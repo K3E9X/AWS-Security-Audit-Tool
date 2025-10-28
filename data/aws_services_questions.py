@@ -3534,15 +3534,99 @@ LAMBDA_QUESTIONS = [
 APIGATEWAY_QUESTIONS = [
     Question(
         id="APIGW-001",
-        question="API Gateway: authorizers configurés, WAF attaché, throttling et caching activés?",
-        description="Sécurité API Gateway",
+        question="Authorizers (Cognito/Lambda/IAM) configurés pour toutes APIs, pas de methods publiques sans authentification?",
+        description="Vérifier que toutes APIs REST/HTTP ont authorizers configurés pour contrôle d'accès strict",
         severity="CRITICAL",
         category="API Gateway",
-        compliance=["OWASP API Security"],
-        technical_details="Cognito/Lambda authorizers, WAF, throttling, caching",
-        remediation=["Configurer authorizer", "Attacher WAF", "Activer throttling"],
-        verification_steps=["aws apigateway get-rest-apis"],
-        references=["https://docs.aws.amazon.com/apigateway/"]
+        compliance=["OWASP API Security", "PCI-DSS", "SOC2"],
+        technical_details="Cognito User Pools pour JWT validation automatique. Lambda authorizers pour logique custom (OAuth, API keys). IAM pour service-to-service avec SigV4",
+        remediation=[
+            "aws apigateway create-authorizer --rest-api-id ID --name CognitoAuth --type COGNITO_USER_POOLS --provider-arns arn:aws:cognito-idp:region:account:userpool/ID",
+            "aws apigateway update-method --rest-api-id ID --resource-id ID --http-method GET --patch-operations op=replace,path=/authorizationType,value=COGNITO_USER_POOLS",
+            "Vérifier aucune method avec authorizationType=NONE en production"
+        ],
+        verification_steps=[
+            "aws apigateway get-authorizers --rest-api-id ID",
+            "aws apigateway get-method --rest-api-id ID --resource-id ID --http-method GET | grep authorizationType",
+            "Identifier toutes methods avec NONE: aws apigateway get-resources --rest-api-id ID"
+        ],
+        references=[
+            "https://docs.aws.amazon.com/apigateway/latest/developerguide/apigateway-control-access-to-api.html",
+            "https://docs.aws.amazon.com/apigateway/latest/developerguide/apigateway-use-lambda-authorizer.html"
+        ]
+    ),
+
+    Question(
+        id="APIGW-002",
+        question="AWS WAF Web ACL attaché avec managed rules (Core Rule Set, SQL injection, XSS) et rate-based rules?",
+        description="Vérifier protection WAF contre OWASP Top 10 et DDoS avec rate limiting par IP",
+        severity="CRITICAL",
+        category="API Gateway",
+        compliance=["OWASP API Security", "PCI-DSS", "CIS Benchmark"],
+        technical_details="WAF managed rules: AWSManagedRulesCommonRuleSet (OWASP), Known Bad Inputs, SQL Database. Rate-based rule: 2000 req/5min par IP",
+        remediation=[
+            "aws wafv2 create-web-acl --name api-waf --scope REGIONAL --default-action Allow={} --rules file://rules.json",
+            "aws wafv2 associate-web-acl --web-acl-arn ARN --resource-arn arn:aws:apigateway:region::/restapis/ID/stages/prod",
+            "Ajouter managed rule groups: Core Rule Set, SQL Database, Known Bad Inputs"
+        ],
+        verification_steps=[
+            "aws wafv2 list-web-acls --scope REGIONAL",
+            "aws wafv2 get-web-acl-for-resource --resource-arn arn:aws:apigateway:region::/restapis/ID/stages/prod",
+            "CloudWatch metrics: aws cloudwatch get-metric-statistics --namespace AWS/WAFV2 --metric-name BlockedRequests"
+        ],
+        references=[
+            "https://docs.aws.amazon.com/waf/latest/developerguide/waf-chapter.html",
+            "https://docs.aws.amazon.com/apigateway/latest/developerguide/apigateway-control-access-aws-waf.html"
+        ]
+    ),
+
+    Question(
+        id="APIGW-003",
+        question="Throttling configuré (usage plans avec rate limits) et response caching activé pour performance?",
+        description="Vérifier usage plans avec throttling par client et caching pour réduire backend load",
+        severity="HIGH",
+        category="API Gateway",
+        compliance=["AWS Well-Architected", "FinOps"],
+        technical_details="Usage plans: rate limit (req/s), burst capacity, quotas mensuels. Cache: 0.5-237GB, TTL 0-3600s, réduit latency et coûts backend",
+        remediation=[
+            "aws apigateway create-usage-plan --name premium --throttle rateLimit=1000,burstLimit=2000 --quota limit=1000000,period=MONTH",
+            "aws apigateway update-stage --rest-api-id ID --stage-name prod --patch-operations op=replace,path=/cacheClusterEnabled,value=true",
+            "aws apigateway create-api-key --name customer-key --enabled | aws apigateway create-usage-plan-key"
+        ],
+        verification_steps=[
+            "aws apigateway get-usage-plans",
+            "aws apigateway get-stage --rest-api-id ID --stage-name prod | grep cacheCluster",
+            "CloudWatch: CacheHitCount vs CacheMissCount pour calculer hit ratio"
+        ],
+        references=[
+            "https://docs.aws.amazon.com/apigateway/latest/developerguide/api-gateway-request-throttling.html",
+            "https://docs.aws.amazon.com/apigateway/latest/developerguide/api-gateway-caching.html"
+        ]
+    ),
+
+    Question(
+        id="APIGW-004",
+        question="Request validation activée avec JSON schemas et CloudWatch Logs (access + execution) configurés?",
+        description="Vérifier validation request body/parameters avant invoke backend et logging détaillé pour audit",
+        severity="MEDIUM",
+        category="API Gateway",
+        compliance=["AWS Well-Architected", "OWASP API Security"],
+        technical_details="Request validators avec JSON Schema Draft 4 pour body validation. CloudWatch Logs: execution logs (debugging) + access logs (analytics structurés)",
+        remediation=[
+            "aws apigateway create-request-validator --rest-api-id ID --name validator --validate-request-body --validate-request-parameters",
+            "aws apigateway create-model --rest-api-id ID --name UserModel --content-type application/json --schema file://schema.json",
+            "aws apigateway update-stage --rest-api-id ID --stage-name prod --patch-operations op=replace,path=/logging/loglevel,value=INFO"
+        ],
+        verification_steps=[
+            "aws apigateway get-request-validators --rest-api-id ID",
+            "aws apigateway get-models --rest-api-id ID",
+            "aws logs tail /aws/apigateway/ID --follow",
+            "Test avec payload invalide: curl -X POST https://api/resource -d '{\"invalid\":\"data\"}' (doit retourner 400)"
+        ],
+        references=[
+            "https://docs.aws.amazon.com/apigateway/latest/developerguide/api-gateway-method-request-validation.html",
+            "https://docs.aws.amazon.com/apigateway/latest/developerguide/set-up-logging.html"
+        ]
     )
 ]
 
@@ -3550,15 +3634,105 @@ APIGATEWAY_QUESTIONS = [
 CLOUDTRAIL_QUESTIONS = [
     Question(
         id="TRAIL-001",
-        question="CloudTrail multi-région activé, logs chiffrés KMS, validation integrity?",
-        description="Audit trail complet",
+        question="CloudTrail multi-région activé avec log file validation, logs chiffrés KMS, et organization trail?",
+        description="Vérifier trail multi-région pour capture complète, validation integrity, encryption KMS, et trail organization-wide",
         severity="CRITICAL",
         category="CloudTrail",
-        compliance=["PCI-DSS", "HIPAA", "SOC2"],
-        technical_details="Multi-region trail, log validation, KMS encryption",
-        remediation=["Créer trail multi-région", "Activer log file validation", "Chiffrer avec KMS"],
-        verification_steps=["aws cloudtrail describe-trails"],
-        references=["https://docs.aws.amazon.com/awscloudtrail/"]
+        compliance=["PCI-DSS", "HIPAA", "SOC2", "CIS Benchmark", "ISO 27001"],
+        technical_details="Multi-region trail capture toutes régions automatiquement. Log validation détecte modifications/suppressions avec digest files. KMS encryption at rest. Organization trail centralise logging tous comptes AWS Organizations",
+        remediation=[
+            "aws cloudtrail create-trail --name org-trail --s3-bucket-name cloudtrail-bucket --is-multi-region-trail --enable-log-file-validation --kms-key-id arn:aws:kms:region:account:key/ID --is-organization-trail",
+            "aws cloudtrail start-logging --name org-trail",
+            "Vérifier S3 bucket policy autorise CloudTrail: Action s3:PutObject avec Condition StringEquals aws:SourceArn"
+        ],
+        verification_steps=[
+            "aws cloudtrail describe-trails --query 'trailList[].[Name,IsMultiRegionTrail,LogFileValidationEnabled,KmsKeyId,IsOrganizationTrail]' --output table",
+            "aws cloudtrail get-trail-status --name org-trail",
+            "aws cloudtrail validate-logs --trail-arn ARN --start-time 2024-01-01T00:00:00Z",
+            "Identifier trails sans validation: aws cloudtrail describe-trails --query 'trailList[?LogFileValidationEnabled==`false`].Name'"
+        ],
+        references=[
+            "https://docs.aws.amazon.com/awscloudtrail/latest/userguide/cloudtrail-concepts.html",
+            "https://docs.aws.amazon.com/awscloudtrail/latest/userguide/cloudtrail-log-file-validation-intro.html",
+            "https://docs.aws.amazon.com/awscloudtrail/latest/userguide/creating-trail-organization.html"
+        ]
+    ),
+
+    Question(
+        id="TRAIL-002",
+        question="CloudWatch Logs integration activée pour alerting temps réel et metric filters configurés?",
+        description="Vérifier streaming CloudTrail vers CloudWatch Logs avec metric filters pour security events",
+        severity="HIGH",
+        category="CloudTrail",
+        compliance=["CIS Benchmark", "Security Monitoring", "SOC2"],
+        technical_details="CloudWatch Logs permet query temps réel et metric filters transforment log patterns en métriques. CIS Benchmark section 3: monitoring unauthorized API calls, console login without MFA, IAM policy changes, etc.",
+        remediation=[
+            "aws cloudtrail update-trail --name trail --cloud-watch-logs-log-group-arn arn:aws:logs:region:account:log-group:/aws/cloudtrail/logs --cloud-watch-logs-role-arn arn:aws:iam::account:role/CloudTrail_CloudWatchLogs_Role",
+            "aws logs put-metric-filter --log-group-name /aws/cloudtrail/logs --filter-name UnauthorizedAPICalls --filter-pattern '{($.errorCode = \"*UnauthorizedOperation\") || ($.errorCode = \"AccessDenied*\")}' --metric-transformations metricName=UnauthorizedAPICalls,metricNamespace=CloudTrailMetrics,metricValue=1",
+            "aws cloudwatch put-metric-alarm --alarm-name UnauthorizedAPICallsAlarm --metric-name UnauthorizedAPICalls --namespace CloudTrailMetrics --statistic Sum --period 300 --threshold 1 --comparison-operator GreaterThanOrEqualToThreshold"
+        ],
+        verification_steps=[
+            "aws cloudtrail describe-trails --query 'trailList[].[Name,CloudWatchLogsLogGroupArn,CloudWatchLogsRoleArn]'",
+            "aws logs describe-metric-filters --log-group-name /aws/cloudtrail/logs",
+            "aws cloudwatch describe-alarms --alarm-name-prefix CloudTrail",
+            "Test: aws logs tail /aws/cloudtrail/logs --follow | grep errorCode"
+        ],
+        references=[
+            "https://docs.aws.amazon.com/awscloudtrail/latest/userguide/send-cloudtrail-events-to-cloudwatch-logs.html",
+            "https://docs.aws.amazon.com/securityhub/latest/userguide/securityhub-cis-controls.html"
+        ]
+    ),
+
+    Question(
+        id="TRAIL-003",
+        question="S3 bucket CloudTrail sécurisé: MFA Delete, versioning, lifecycle, bucket policy restrictive, access logging?",
+        description="Vérifier sécurité bucket S3 stockant logs CloudTrail avec protections contre suppression/modification",
+        severity="HIGH",
+        category="CloudTrail",
+        compliance=["Audit Integrity", "Forensics", "Compliance Retention"],
+        technical_details="Bucket CloudTrail doit avoir: versioning (historique), MFA Delete (protection suppression), lifecycle (Glacier après 90j), bucket policy deny modifications sauf CloudTrail, S3 access logging (audit accès bucket)",
+        remediation=[
+            "aws s3api put-bucket-versioning --bucket cloudtrail-bucket --versioning-configuration Status=Enabled,MFADelete=Enabled --mfa 'arn:aws:iam::account:mfa/user 123456'",
+            "aws s3api put-bucket-lifecycle-configuration --bucket cloudtrail-bucket --lifecycle-configuration file://lifecycle.json",
+            "aws s3api put-bucket-logging --bucket cloudtrail-bucket --bucket-logging-status file://logging.json",
+            "Bucket policy: Deny s3:DeleteObject, s3:PutObject sauf Principal Service cloudtrail.amazonaws.com"
+        ],
+        verification_steps=[
+            "aws s3api get-bucket-versioning --bucket cloudtrail-bucket",
+            "aws s3api get-bucket-lifecycle-configuration --bucket cloudtrail-bucket",
+            "aws s3api get-bucket-logging --bucket cloudtrail-bucket",
+            "aws s3api get-bucket-policy --bucket cloudtrail-bucket | jq '.Policy | fromjson'",
+            "Test MFA Delete: aws s3api delete-object --bucket cloudtrail-bucket --key test (doit échouer sans MFA)"
+        ],
+        references=[
+            "https://docs.aws.amazon.com/awscloudtrail/latest/userguide/create-s3-bucket-policy-for-cloudtrail.html",
+            "https://docs.aws.amazon.com/AmazonS3/latest/userguide/Versioning.html#MultiFactorAuthenticationDelete"
+        ]
+    ),
+
+    Question(
+        id="TRAIL-004",
+        question="Data events activés (S3, Lambda) et CloudTrail Insights pour anomaly detection?",
+        description="Vérifier logging data events S3/Lambda et Insights ML pour détection activité inhabituelle",
+        severity="MEDIUM",
+        category="CloudTrail",
+        compliance=["Security Analytics", "Threat Detection"],
+        technical_details="Data events: capture S3 GetObject/PutObject/DeleteObject et Lambda Invoke (coût supplémentaire). Insights: ML détecte anomalies comme burst API calls, error rate spikes. Management events: gratuits, toujours loggés",
+        remediation=[
+            "aws cloudtrail put-event-selectors --trail-name trail --event-selectors '[{\"ReadWriteType\":\"All\",\"IncludeManagementEvents\":true,\"DataResources\":[{\"Type\":\"AWS::S3::Object\",\"Values\":[\"arn:aws:s3:::sensitive-bucket/*\"]},{\"Type\":\"AWS::Lambda::Function\",\"Values\":[\"arn:aws:lambda:*:*:function/*\"]}]}]'",
+            "aws cloudtrail put-insight-selectors --trail-name trail --insight-selectors '[{\"InsightType\":\"ApiCallRateInsight\"}]'",
+            "Attention coûts: data events = $0.10 per 100k events"
+        ],
+        verification_steps=[
+            "aws cloudtrail get-event-selectors --trail-name trail",
+            "aws cloudtrail get-insight-selectors --trail-name trail",
+            "aws cloudtrail lookup-events --lookup-attributes AttributeKey=ResourceType,AttributeValue=AWS::S3::Object --max-results 10",
+            "CloudTrail Insights events: aws cloudtrail lookup-insights-events --event-source awsinsights.amazonaws.com"
+        ],
+        references=[
+            "https://docs.aws.amazon.com/awscloudtrail/latest/userguide/logging-data-events-with-cloudtrail.html",
+            "https://docs.aws.amazon.com/awscloudtrail/latest/userguide/logging-insights-events-with-cloudtrail.html"
+        ]
     )
 ]
 
