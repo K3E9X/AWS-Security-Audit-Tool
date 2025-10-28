@@ -19,7 +19,12 @@ st.set_page_config(
 )
 
 # Import des modules
-from data.aws_services_questions import ALL_QUESTIONS, IAM_QUESTIONS, VPC_QUESTIONS
+from data.aws_services_questions import (
+    ALL_QUESTIONS, IAM_QUESTIONS, VPC_QUESTIONS, EC2_QUESTIONS, S3_QUESTIONS,
+    RDS_QUESTIONS, LAMBDA_QUESTIONS, APIGATEWAY_QUESTIONS, CLOUDTRAIL_QUESTIONS,
+    CLOUDFORMATION_QUESTIONS, CLOUDWATCH_QUESTIONS, CLOUDFRONT_QUESTIONS,
+    KMS_QUESTIONS, CONTAINER_QUESTIONS, ROUTE53_QUESTIONS
+)
 from utils.session import AuditSession
 from utils.export import export_to_markdown, export_to_pdf
 from utils.diagram import DiagramEditor
@@ -108,6 +113,13 @@ with st.sidebar:
         "RDS & Databases": "🗄️",
         "Lambda & Serverless": "⚡",
         "API Gateway": "🔌",
+        "CloudFormation": "📜",
+        "CloudWatch": "📈",
+        "CloudFront": "🌍",
+        "CloudTrail": "🔍",
+        "KMS & Encryption": "🔐",
+        "Containers (ECS/EKS)": "🐳",
+        "Route53": "🌐",
         "Architecture Diagram": "🏗️",
         "Audit Session": "📋",
         "Export Report": "📄"
@@ -140,9 +152,10 @@ def render_dashboard():
     col1, col2, col3, col4 = st.columns(4)
 
     with col1:
-        st.markdown("""
+        total_questions = len(ALL_QUESTIONS)
+        st.markdown(f"""
         <div class="metric-card">
-            <h2>150+</h2>
+            <h2>{total_questions}</h2>
             <p>Security Questions</p>
         </div>
         """, unsafe_allow_html=True)
@@ -433,10 +446,39 @@ elif page == "IAM Security":
     render_service_questions("IAM Security", IAM_QUESTIONS)
 elif page == "VPC & Network":
     render_service_questions("VPC & Network Security", VPC_QUESTIONS)
+elif page == "EC2 & Compute":
+    render_service_questions("EC2 & Compute Security", EC2_QUESTIONS)
+elif page == "S3 & Storage":
+    render_service_questions("S3 & Storage Security", S3_QUESTIONS)
+elif page == "RDS & Databases":
+    render_service_questions("RDS & Databases Security", RDS_QUESTIONS)
+elif page == "Lambda & Serverless":
+    render_service_questions("Lambda & Serverless Security", LAMBDA_QUESTIONS)
+elif page == "API Gateway":
+    render_service_questions("API Gateway Security", APIGATEWAY_QUESTIONS)
+elif page == "CloudFormation":
+    render_service_questions("CloudFormation Security", CLOUDFORMATION_QUESTIONS)
+elif page == "CloudWatch":
+    render_service_questions("CloudWatch Monitoring & Alerts", CLOUDWATCH_QUESTIONS)
+elif page == "CloudFront":
+    render_service_questions("CloudFront & CDN Security", CLOUDFRONT_QUESTIONS)
+elif page == "CloudTrail":
+    render_service_questions("CloudTrail & Audit Logging", CLOUDTRAIL_QUESTIONS)
+elif page == "KMS & Encryption":
+    render_service_questions("KMS & Encryption Management", KMS_QUESTIONS)
+elif page == "Containers (ECS/EKS)":
+    render_service_questions("Containers Security (ECS/EKS)", CONTAINER_QUESTIONS)
+elif page == "Route53":
+    render_service_questions("Route53 DNS Security", ROUTE53_QUESTIONS)
 elif page == "Architecture Diagram":
     render_diagram_editor()
+elif page == "Audit Session":
+    st.markdown('<div class="main-header">Audit Session Management</div>', unsafe_allow_html=True)
+    session = st.session_state.audit_session
+    st.write(f"**Answered Questions:** {session.answered} / {session.total}")
+    st.write(f"**Progress:** {session.progress}%")
+    st.json(session.get_statistics())
 elif page == "Export Report":
     render_export()
 else:
-    st.info(f"{page} - Section en cours de développement")
-    st.markdown("Plus de 150 questions techniques seront ajoutées pour ce service.")
+    st.warning(f"Page '{page}' not found")
