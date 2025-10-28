@@ -978,7 +978,2581 @@ VPC_QUESTIONS = [
     )
 ]
 
-# Continuer avec d'autres services...
-# EC2, S3, RDS, Lambda, API Gateway, CloudFront, etc.
+# ==================== EC2 & COMPUTE ====================
+EC2_QUESTIONS = [
+    Question(
+        id="EC2-001",
+        question="IMDSv2 obligatoire sur toutes les instances EC2 pour prévenir SSRF et vol de credentials?",
+        description="Instance Metadata Service v2 avec session tokens obligatoire pour prévenir les attaques SSRF permettant de voler les credentials IAM",
+        severity="CRITICAL",
+        category="EC2",
+        compliance=["CIS Benchmark", "AWS Well-Architected", "NIST"],
+        technical_details="""
+        Vulnérabilité IMDSv1:
+        - Accessible via simple HTTP GET sans authentification
+        - Exploitable via SSRF (Server-Side Request Forgery)
+        - Permet vol de credentials IAM role de l'instance
+        - Exemple exploit: curl http://169.254.169.254/latest/meta-data/iam/security-credentials/
 
-ALL_QUESTIONS = IAM_QUESTIONS + VPC_QUESTIONS
+        IMDSv2 (Token-based):
+        - Nécessite PUT request pour obtenir token session
+        - Token avec TTL configurable (1-6 heures)
+        - Hop limit = 1 (bloque forwarding via NAT/Proxy)
+        - Protection contre SSRF car attaquant ne peut pas faire PUT via SSRF
+
+        Metadata exposées (sensibles):
+        - IAM role credentials (temporary)
+        - User data (peut contenir secrets)
+        - Security credentials
+        - Network configuration
+
+        Configuration IMDSv2:
+        - HttpTokens: required (force v2)
+        - HttpPutResponseHopLimit: 1 (empêche proxying)
+        - HttpEndpoint: enabled
+        - InstanceMetadataTags: enabled (optionnel)
+        """,
+        remediation=[
+            "Pour nouvelles instances, exiger IMDSv2 dans launch template:",
+            "  MetadataOptions:",
+            "    HttpTokens: required",
+            "    HttpPutResponseHopLimit: 1",
+            "    HttpEndpoint: enabled",
+            "",
+            "Pour instances existantes:",
+            "  aws ec2 modify-instance-metadata-options \\",
+            "    --instance-id i-xxxxx \\",
+            "    --http-tokens required \\",
+            "    --http-put-response-hop-limit 1",
+            "",
+            "Identifier instances avec IMDSv1:",
+            "  aws ec2 describe-instances \\",
+            "    --query 'Reservations[].Instances[?MetadataOptions.HttpTokens==`optional`].[InstanceId,Tags[?Key==`Name`].Value|[0]]'",
+            "",
+            "Créer SCP pour bloquer lancement instances sans IMDSv2:",
+            '  {"Effect": "Deny",',
+            '   "Action": "ec2:RunInstances",',
+            '   "Resource": "arn:aws:ec2:*:*:instance/*",',
+            '   "Condition": {',
+            '     "StringNotEquals": {"ec2:MetadataHttpTokens": "required"}',
+            '   }}',
+            "",
+            "Automatiser: AWS Config rule imds-v2-enabled"
+        ],
+        verification_steps=[
+            "aws ec2 describe-instances --query 'Reservations[].Instances[].[InstanceId,MetadataOptions.HttpTokens,MetadataOptions.HttpPutResponseHopLimit]' --output table",
+            "Vérifier HttpTokens = required pour toutes instances",
+            "Vérifier HttpPutResponseHopLimit = 1",
+            "Test depuis instance:",
+            "  # V1 (should fail):",
+            "  curl http://169.254.169.254/latest/meta-data/",
+            "  # V2 (should work):",
+            "  TOKEN=$(curl -X PUT 'http://169.254.169.254/latest/api/token' -H 'X-aws-ec2-metadata-token-ttl-seconds: 21600')",
+            "  curl -H \"X-aws-ec2-metadata-token: $TOKEN\" http://169.254.169.254/latest/meta-data/",
+            "Config rule: aws configservice describe-compliance-by-config-rule --config-rule-names imds-v2-enabled"
+        ],
+        references=[
+            "https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/configuring-instance-metadata-service.html",
+            "https://aws.amazon.com/blogs/security/defense-in-depth-open-firewalls-reverse-proxies-ssrf-vulnerabilities-ec2-instance-metadata-service/"
+        ]
+    ),
+
+    Question(
+        id="EC2-002",
+        question="Chiffrement des volumes EBS activé par défaut et chiffrement en transit pour EBS optimized?",
+        description="Vérifier que tous les volumes EBS sont chiffrés avec KMS et que le chiffrement EBS-optimized est activé pour données en transit",
+        severity="CRITICAL",
+        category="EC2",
+        compliance=["PCI-DSS", "HIPAA", "GDPR", "ISO 27001"],
+        technical_details="""
+        EBS Encryption at rest:
+        - Utilise AES-256
+        - Transparent (pas d'impact performance)
+        - Chiffrement data blocks, snapshots, volumes créés depuis snapshots
+        - Clé KMS par défaut ou customer-managed key
+
+        EBS Encryption in transit:
+        - EBS-optimized instances: dedicated bandwidth
+        - Chiffrement data entre instance et volumes EBS
+        - Pas de configuration supplémentaire si EBS-optimized
+
+        Types de volumes:
+        - gp3/gp2: General Purpose SSD
+        - io2/io1: Provisioned IOPS SSD
+        - st1: Throughput Optimized HDD
+        - sc1: Cold HDD
+
+        Activation chiffrement par défaut:
+        - Au niveau région
+        - Tous nouveaux volumes automatiquement chiffrés
+        - Ne chiffre pas volumes existants
+
+        Snapshots:
+        - Snapshots de volumes chiffrés sont chiffrés
+        - Snapshots non chiffrés peuvent être copiés avec chiffrement
+        - Partage snapshots: attention aux clés KMS
+        """,
+        remediation=[
+            "Activer encryption by default par région:",
+            "  aws ec2 enable-ebs-encryption-by-default --region <region>",
+            "",
+            "Vérifier status:",
+            "  aws ec2 get-ebs-encryption-by-default --region <region>",
+            "",
+            "Définir KMS key par défaut:",
+            "  aws ec2 modify-ebs-default-kms-key-id --kms-key-id <key-arn>",
+            "",
+            "Chiffrer volumes existants non chiffrés:",
+            "  1. Créer snapshot du volume",
+            "  2. Copier snapshot avec encryption:",
+            "     aws ec2 copy-snapshot --source-snapshot-id snap-xxxxx --encrypted --kms-key-id <key-id>",
+            "  3. Créer volume depuis snapshot chiffré",
+            "  4. Attacher nouveau volume, détacher ancien",
+            "",
+            "Identifier volumes non chiffrés:",
+            "  aws ec2 describe-volumes --query 'Volumes[?Encrypted==`false`].[VolumeId,Size,State,Attachments[0].InstanceId]' --output table",
+            "",
+            "Créer AWS Config rule: encrypted-volumes",
+            "",
+            "SCP pour bloquer création volumes non chiffrés:",
+            '  {"Effect": "Deny",',
+            '   "Action": ["ec2:CreateVolume", "ec2:RunInstances"],',
+            '   "Condition": {"Bool": {"ec2:Encrypted": "false"}}}'
+        ],
+        verification_steps=[
+            "aws ec2 get-ebs-encryption-by-default --region <region>",
+            "aws ec2 get-ebs-default-kms-key-id --region <region>",
+            "aws ec2 describe-volumes --filters Name=encrypted,Values=false",
+            "aws ec2 describe-snapshots --owner-ids self --filters Name=encrypted,Values=false",
+            "Vérifier aucun volume/snapshot non chiffré",
+            "Pour instances: vérifier EbsOptimized = true:",
+            "  aws ec2 describe-instances --query 'Reservations[].Instances[].[InstanceId,InstanceType,EbsOptimized]' --output table"
+        ],
+        references=[
+            "https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/EBSEncryption.html",
+            "https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ebs-optimized.html"
+        ]
+    ),
+
+    Question(
+        id="EC2-003",
+        question="Systems Manager Session Manager utilisé au lieu de SSH/RDP avec bastion host?",
+        description="Vérifier que l'accès aux instances utilise SSM Session Manager éliminant besoin de SSH keys, bastions, et Security Groups ouverts",
+        severity="HIGH",
+        category="EC2",
+        compliance=["CIS Benchmark", "Zero Trust", "AWS Well-Architected"],
+        technical_details="""
+        Avantages Session Manager vs SSH:
+        - Pas de clés SSH à gérer/distribuer
+        - Pas de bastion host à maintenir
+        - Pas de ports SSH/RDP ouverts (Security Groups)
+        - Logging centralisé dans CloudTrail
+        - Enregistrement sessions (audit trail)
+        - IAM-based access control
+        - MFA support via IAM
+        - Port forwarding sécurisé
+        - Connexion via console ou CLI
+
+        Architecture:
+        - Instance ← SSM Agent → SSM Service ← IAM Policy ← User
+        - Communication via HTTPS (443)
+        - Pas de inbound ports ouverts
+
+        Prérequis:
+        - SSM Agent installé (pré-installé AMIs récentes)
+        - IAM role sur instance avec AmazonSSMManagedInstanceCore
+        - Connectivité: Internet ou VPC Endpoints (ssm, ssmmessages, ec2messages)
+        - IAM permissions user: ssm:StartSession
+
+        Features additionnelles:
+        - Run Command: exécution commandes à distance
+        - Patch Manager: gestion patches OS
+        - State Manager: configuration management
+        - Port forwarding: tunnel SSH/RDP si vraiment nécessaire
+        - Session recording: enregistrement complet sessions
+        """,
+        remediation=[
+            "1. Installer SSM Agent si absent:",
+            "   # Amazon Linux 2 / Ubuntu (pré-installé sur AMIs récentes)",
+            "   sudo yum install -y amazon-ssm-agent  # AL2",
+            "   sudo systemctl enable amazon-ssm-agent",
+            "   sudo systemctl start amazon-ssm-agent",
+            "",
+            "2. Créer IAM role pour instances:",
+            "   aws iam create-role --role-name EC2-SSM-Role \\",
+            "     --assume-role-policy-document '{",
+            '       "Version": "2012-10-17",',
+            '       "Statement": [{"Effect": "Allow",',
+            '         "Principal": {"Service": "ec2.amazonaws.com"},',
+            '         "Action": "sts:AssumeRole"}]}\'',
+            "",
+            "3. Attacher managed policy:",
+            "   aws iam attach-role-policy --role-name EC2-SSM-Role \\",
+            "     --policy-arn arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore",
+            "",
+            "4. Créer instance profile et associer:",
+            "   aws iam create-instance-profile --instance-profile-name EC2-SSM-Profile",
+            "   aws iam add-role-to-instance-profile --instance-profile-name EC2-SSM-Profile --role-name EC2-SSM-Role",
+            "   aws ec2 associate-iam-instance-profile --instance-id i-xxxxx --iam-instance-profile Name=EC2-SSM-Profile",
+            "",
+            "5. Créer VPC Endpoints (si pas d'Internet Gateway):",
+            "   aws ec2 create-vpc-endpoint --vpc-id vpc-xxxxx --service-name com.amazonaws.<region>.ssm",
+            "   aws ec2 create-vpc-endpoint --vpc-id vpc-xxxxx --service-name com.amazonaws.<region>.ssmmessages",
+            "   aws ec2 create-vpc-endpoint --vpc-id vpc-xxxxx --service-name com.amazonaws.<region>.ec2messages",
+            "",
+            "6. Donner permissions IAM users:",
+            "   Policy: ssm:StartSession sur arn:aws:ec2:region:account:instance/*",
+            "",
+            "7. Activer session logging:",
+            "   aws ssm create-document --name SessionManagerSettings --document-type Session \\",
+            "     --content file://session-preferences.json",
+            "",
+            "8. Fermer ports SSH/RDP dans Security Groups"
+        ],
+        verification_steps=[
+            "Lister instances managed:",
+            "  aws ssm describe-instance-information --query 'InstanceInformationList[].[InstanceId,PingStatus,PlatformName,AgentVersion]' --output table",
+            "",
+            "Vérifier instance accessible:",
+            "  aws ssm start-session --target i-xxxxx",
+            "",
+            "Vérifier IAM role attaché:",
+            "  aws ec2 describe-instances --instance-ids i-xxxxx --query 'Reservations[].Instances[].IamInstanceProfile'",
+            "",
+            "Vérifier SSM Agent status:",
+            "  sudo systemctl status amazon-ssm-agent",
+            "",
+            "Vérifier Security Groups ne contiennent pas SSH/RDP ouvert:",
+            "  aws ec2 describe-security-groups --query 'SecurityGroups[?IpPermissions[?(FromPort==`22` || FromPort==`3389`) && IpRanges[?CidrIp==`0.0.0.0/0`]]].[GroupId,GroupName]'",
+            "",
+            "Audit logs:",
+            "  aws cloudtrail lookup-events --lookup-attributes AttributeKey=EventName,AttributeValue=StartSession"
+        ],
+        references=[
+            "https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager.html",
+            "https://aws.amazon.com/blogs/mt/vpc-endpoints-for-ssm-and-session-manager/"
+        ]
+    ),
+
+    Question(
+        id="EC2-004",
+        question="Patch management avec Systems Manager Patch Manager: baseline et compliance tracking?",
+        description="Vérifier qu'un processus automatisé de patching existe via SSM Patch Manager avec baselines et reporting de compliance",
+        severity="HIGH",
+        category="EC2",
+        compliance=["PCI-DSS", "HIPAA", "ISO 27001", "SOC2"],
+        technical_details="""
+        Patch Manager capabilities:
+        - Patch baselines: définit quels patches installer
+        - Patch groups: catégorisation instances
+        - Maintenance windows: fenêtres d'installation
+        - Compliance reporting: tracking patch status
+        - Pre-defined baselines: AWS-DefaultPatchBaseline
+        - Custom baselines: pour règles spécifiques
+
+        Patch baselines:
+        - Operating system type (Amazon Linux, Ubuntu, Windows, etc.)
+        - Patch classification (Security, Critical, Important, etc.)
+        - Patch severity levels
+        - Auto-approval delays (ex: 7 jours après release)
+        - Approved/rejected patches lists
+        - Patch sources (repositories)
+
+        Maintenance windows:
+        - Schedule: cron ou rate expression
+        - Duration: combien de temps
+        - Cutoff: arrêt nouvelles exécutions avant fin
+        - Targets: instances par tags
+        - Tasks: Run Command documents (AWS-RunPatchBaseline)
+
+        Compliance levels:
+        - COMPLIANT: tous patches installés
+        - NON_COMPLIANT: patches manquants
+        - UNSPECIFIED: pas de data
+        - NOT_APPLICABLE: n'a pas tourné
+
+        Integration:
+        - CloudWatch Events: alertes non-compliance
+        - SNS: notifications
+        - S3: export compliance reports
+        """,
+        remediation=[
+            "1. Créer custom patch baseline:",
+            "   aws ssm create-patch-baseline \\",
+            "     --name 'Production-Baseline' \\",
+            "     --operating-system AMAZON_LINUX_2 \\",
+            "     --approval-rules file://approval-rules.json \\",
+            "     --approved-patches 'CVE-2023-12345,CVE-2023-67890' \\",
+            "     --rejected-patches 'KB1234567'",
+            "",
+            "   approval-rules.json:",
+            "   {",
+            '     "PatchRules": [{',
+            '       "PatchFilterGroup": {',
+            '         "PatchFilters": [{',
+            '           "Key": "CLASSIFICATION",',
+            '           "Values": ["Security", "Critical"]',
+            "         }]",
+            "       },",
+            '       "ComplianceLevel": "CRITICAL",',
+            '       "ApproveAfterDays": 7',
+            "     }]",
+            "   }",
+            "",
+            "2. Créer patch group et associer baseline:",
+            "   # Tag instances:",
+            "   aws ec2 create-tags --resources i-xxxxx --tags Key=Patch Group,Value=Production",
+            "   # Register patch group:",
+            "   aws ssm register-patch-baseline-for-patch-group \\",
+            "     --baseline-id pb-xxxxx \\",
+            "     --patch-group Production",
+            "",
+            "3. Créer maintenance window:",
+            "   aws ssm create-maintenance-window \\",
+            "     --name 'Production-Patching-Window' \\",
+            "     --schedule 'cron(0 2 ? * SUN *)' \\",
+            "     --duration 4 \\",
+            "     --cutoff 1 \\",
+            "     --allow-unassociated-targets",
+            "",
+            "4. Register targets (instances):",
+            "   aws ssm register-target-with-maintenance-window \\",
+            "     --window-id mw-xxxxx \\",
+            "     --target-type INSTANCE \\",
+            "     --resource-type INSTANCE \\",
+            "     --targets Key=tag:Patch Group,Values=Production",
+            "",
+            "5. Register task (patch installation):",
+            "   aws ssm register-task-with-maintenance-window \\",
+            "     --window-id mw-xxxxx \\",
+            "     --task-type RUN_COMMAND \\",
+            "     --task-arn AWS-RunPatchBaseline \\",
+            "     --targets Key=WindowTargetIds,Values=<target-id> \\",
+            "     --task-invocation-parameters 'RunCommand={Parameters={Operation=[Install]}}'",
+            "",
+            "6. Configurer SNS notifications:",
+            "   aws ssm update-maintenance-window --window-id mw-xxxxx \\",
+            "     --notification-config NotificationArn=arn:aws:sns:region:account:topic,NotificationEvents=[SUCCESS,FAILED]",
+            "",
+            "7. Scan compliance (sans installer):",
+            "   aws ssm send-command \\",
+            "     --document-name AWS-RunPatchBaseline \\",
+            "     --parameters 'Operation=Scan' \\",
+            "     --targets Key=tag:Patch Group,Values=Production"
+        ],
+        verification_steps=[
+            "Lister patch baselines:",
+            "  aws ssm describe-patch-baselines",
+            "",
+            "Voir compliance summary:",
+            "  aws ssm describe-patch-group-state --patch-group Production",
+            "",
+            "Compliance par instance:",
+            "  aws ssm list-compliance-items --resource-ids i-xxxxx --resource-types ManagedInstance",
+            "",
+            "Patches manquants par instance:",
+            "  aws ssm describe-instance-patches --instance-id i-xxxxx",
+            "",
+            "Voir maintenance windows:",
+            "  aws ssm describe-maintenance-windows",
+            "",
+            "Historique exécutions:",
+            "  aws ssm describe-maintenance-window-executions --window-id mw-xxxxx",
+            "",
+            "Dashboard compliance:",
+            "  aws ssm list-compliance-summaries",
+            "",
+            "Export compliance report:",
+            "  aws ssm list-resource-compliance-summaries --output json > compliance-report.json"
+        ],
+        references=[
+            "https://docs.aws.amazon.com/systems-manager/latest/userguide/systems-manager-patch.html",
+            "https://docs.aws.amazon.com/systems-manager/latest/userguide/sysman-compliance-about.html"
+        ]
+    ),
+
+    Question(
+        id="EC2-005",
+        question="AMI hardening: Golden AMIs avec CIS benchmarks et images builder pipeline automatisé?",
+        description="Vérifier existence de processus de création AMI hardened selon CIS benchmarks avec pipeline automatisé EC2 Image Builder",
+        severity="HIGH",
+        category="EC2",
+        compliance=["CIS Benchmark", "NIST", "ISO 27001"],
+        technical_details="""
+        Golden AMI concept:
+        - AMI de base hardened selon security standards
+        - Pré-configurée avec:
+          * OS patches récents
+          * Security agents (AV, HIDS, logging)
+          * Hardening configurations
+          * Compliance scanning tools
+          * Monitoring agents
+        - Utilisée comme base pour toutes instances
+        - Régulièrement mise à jour (monthly/quarterly)
+
+        CIS Benchmarks applicables:
+        - CIS Amazon Linux 2 Benchmark
+        - CIS Ubuntu Benchmark
+        - CIS Windows Server Benchmark
+        - CIS Red Hat Enterprise Linux Benchmark
+
+        Hardenings typiques:
+        - Désactiver services inutiles
+        - Configurer firewall (iptables/firewalld)
+        - SSH hardening (disable root login, key-based only)
+        - Audit logging (auditd)
+        - Password policies
+        - File permissions strictes
+        - Remove unnecessary packages
+        - Disable USB/CD-ROM mounting
+        - AIDE (Advanced Intrusion Detection Environment)
+
+        EC2 Image Builder:
+        - Service AWS pour automatiser création/test/distribution AMIs
+        - Pipeline définit:
+          * Base image (source AMI)
+          * Components (scripts hardening)
+          * Tests (validation)
+          * Distribution (regions, comptes)
+        - Scheduling: cron pour rebuild automatique
+        - Versioning: tracking des AMI versions
+
+        Components disponibles:
+        - AWS-managed: Amazon Linux hardening, CIS benchmarks
+        - Custom: scripts bash/PowerShell
+        - Test components: validation hardening appliqué
+
+        Workflow:
+        1. Source AMI (public AWS ou custom)
+        2. Build: application components (hardening)
+        3. Test: validation tests components
+        4. Distribute: copy vers regions/comptes
+        5. Launch permissions: partage contrôlé
+        """,
+        remediation=[
+            "1. Créer Image Builder Pipeline:",
+            "",
+            "   A. Créer component de hardening CIS:",
+            "   aws imagebuilder create-component \\",
+            "     --name CIS-Hardening-AL2 \\",
+            "     --semantic-version 1.0.0 \\",
+            "     --platform Linux \\",
+            "     --data file://cis-hardening.yml",
+            "",
+            "   cis-hardening.yml (example):",
+            "   name: CIS Amazon Linux 2 Hardening",
+            "   schemaVersion: 1.0",
+            "   phases:",
+            "     - name: build",
+            "       steps:",
+            "         - name: DisableRootLogin",
+            "           action: ExecuteBash",
+            "           inputs:",
+            "             commands:",
+            "               - sed -i 's/PermitRootLogin yes/PermitRootLogin no/' /etc/ssh/sshd_config",
+            "         - name: ConfigureFirewall",
+            "           action: ExecuteBash",
+            "           inputs:",
+            "             commands:",
+            "               - yum install -y firewalld",
+            "               - systemctl enable firewalld",
+            "         - name: InstallSecurityTools",
+            "           action: ExecuteBash",
+            "           inputs:",
+            "             commands:",
+            "               - yum install -y aide",
+            "               - aide --init",
+            "",
+            "   B. Créer test component:",
+            "   aws imagebuilder create-component \\",
+            "     --name CIS-Validation-Tests \\",
+            "     --semantic-version 1.0.0 \\",
+            "     --platform Linux \\",
+            "     --data file://validation-tests.yml",
+            "",
+            "   C. Créer infrastructure configuration:",
+            "   aws imagebuilder create-infrastructure-configuration \\",
+            "     --name ImageBuilder-Infra \\",
+            "     --instance-types t3.medium \\",
+            "     --instance-profile-name ImageBuilderRole \\",
+            "     --security-group-ids sg-xxxxx \\",
+            "     --subnet-id subnet-xxxxx \\",
+            "     --terminate-instance-on-failure",
+            "",
+            "   D. Créer distribution configuration:",
+            "   aws imagebuilder create-distribution-configuration \\",
+            "     --name Multi-Region-Distribution \\",
+            "     --distributions file://distribution.json",
+            "",
+            "   distribution.json:",
+            "   [{",
+            '     "region": "us-east-1",',
+            '     "amiDistributionConfiguration": {',
+            '       "name": "Golden-AMI-{{imagebuilder:buildDate}}",',
+            '       "description": "Hardened AMI CIS Level 1",',
+            '       "amiTags": {"CIS": "Level1", "Environment": "Production"},',
+            '       "launchPermission": {"userIds": ["123456789012"]}',
+            "     }",
+            "   }]",
+            "",
+            "   E. Créer image recipe:",
+            "   aws imagebuilder create-image-recipe \\",
+            "     --name Golden-AMI-Recipe \\",
+            "     --semantic-version 1.0.0 \\",
+            "     --parent-image arn:aws:imagebuilder:region:aws:image/amazon-linux-2-x86/x.x.x \\",
+            "     --components componentArn=<cis-hardening-arn> \\",
+            "     --block-device-mappings file://block-devices.json",
+            "",
+            "   F. Créer image pipeline:",
+            "   aws imagebuilder create-image-pipeline \\",
+            "     --name Golden-AMI-Pipeline \\",
+            "     --image-recipe-arn <recipe-arn> \\",
+            "     --infrastructure-configuration-arn <infra-arn> \\",
+            "     --distribution-configuration-arn <distrib-arn> \\",
+            "     --image-tests-configuration imageTestsEnabled=true,timeoutMinutes=90 \\",
+            "     --schedule 'scheduleExpression=cron(0 0 1 * ? *)'  # Monthly",
+            "",
+            "2. Déclencher build manuellement:",
+            "   aws imagebuilder start-image-pipeline-execution --image-pipeline-arn <arn>",
+            "",
+            "3. Appliquer tag governance:",
+            "   - AMIs doivent être taggées avec version, CIS level, date",
+            "   - Deprecate old AMIs après 3 mois",
+            "   - Automatiser rotation AMIs utilisées",
+            "",
+            "4. Documenter baseline configuration:",
+            "   - Créer runbook avec toutes hardenings appliquées",
+            "   - Maintenir changelog des modifications",
+            "   - Scanner régulièrement avec AWS Inspector"
+        ],
+        verification_steps=[
+            "Lister pipelines Image Builder:",
+            "  aws imagebuilder list-image-pipelines",
+            "",
+            "Voir détails pipeline:",
+            "  aws imagebuilder get-image-pipeline --image-pipeline-arn <arn>",
+            "",
+            "Historique builds:",
+            "  aws imagebuilder list-image-pipeline-images --image-pipeline-arn <arn>",
+            "",
+            "Lister AMIs créées:",
+            "  aws ec2 describe-images --owners self --filters 'Name=name,Values=Golden-AMI-*'",
+            "",
+            "Vérifier tags AMI:",
+            "  aws ec2 describe-images --image-ids ami-xxxxx --query 'Images[].Tags'",
+            "",
+            "Test compliance CIS sur AMI:",
+            "  # Lancer instance depuis AMI",
+            "  # Installer CIS-CAT tool ou OpenSCAP",
+            "  # Run assessment:",
+            "  oscap xccdf eval --profile cis --results results.xml cis-benchmark.xml",
+            "",
+            "Vérifier dernière execution pipeline:",
+            "  aws imagebuilder list-image-pipeline-images --image-pipeline-arn <arn> --max-results 1",
+            "",
+            "Inspector scan findings:",
+            "  aws inspector2 list-findings --filter-criteria 'resourceType={comparison=EQUALS,value=AWS_EC2_INSTANCE}'"
+        ],
+        references=[
+            "https://docs.aws.amazon.com/imagebuilder/latest/userguide/what-is-image-builder.html",
+            "https://www.cisecurity.org/cis-benchmarks/",
+            "https://aws.amazon.com/blogs/mt/create-immutable-servers-using-ec2-image-builder-aws-codepipeline/"
+        ]
+    )
+]
+
+# ==================== S3 & STORAGE ====================
+S3_QUESTIONS = [
+    Question(
+        id="S3-001",
+        question="Block Public Access activé au niveau compte et bucket pour prévenir expositions accidentelles?",
+        description="Vérifier que Block Public Access est activé globalement et par bucket pour empêcher toute exposition publique non intentionnelle",
+        severity="CRITICAL",
+        category="S3",
+        compliance=["CIS Benchmark", "GDPR", "PCI-DSS", "HIPAA"],
+        technical_details="""
+        S3 Block Public Access settings (4 contrôles):
+
+        1. BlockPublicAcls:
+           - Bloque ajout de nouvelles ACLs publiques
+           - Bloque modification ACLs existantes vers publique
+           - N'affecte pas ACLs publiques existantes
+
+        2. IgnorePublicAcls:
+           - Ignore toutes ACLs publiques
+           - Traite objets comme privés même si ACL dit public
+           - Plus restrictif que BlockPublicAcls
+
+        3. BlockPublicPolicy:
+           - Bloque ajout/modification bucket policies avec public access
+           - Validation lors du PUT bucket policy
+
+        4. RestrictPublicBuckets:
+           - Restreint accès aux buckets avec policies publiques
+           - Seulement AWS service principals et autorisés dans bucket policy
+
+        Niveaux d'application:
+        - Account level: appliqué à tous buckets du compte
+        - Bucket level: settings spécifiques par bucket
+        - Precedence: settings compte override settings bucket
+
+        Cas d'usage public légitime:
+        - Hosting static website
+        - Public downloads (ex: open data)
+        - CloudFront origin (recommandé: OAI au lieu de public)
+
+        Méthodes d'accès public à bloquer:
+        - Bucket ACLs (public-read, public-read-write)
+        - Object ACLs (public-read, public-read-write)
+        - Bucket policies avec Principal: "*" sans conditions
+        - Bucket policies avec Principal: "*" et Condition trop large
+
+        Risques exposition:
+        - Data breach (leak données sensibles)
+        - Ransomware (modification/suppression)
+        - Crypto mining (servir malware)
+        - Compliance violations
+        - Réputation damage
+        """,
+        remediation=[
+            "1. Activer Block Public Access au niveau compte (toutes régions):",
+            "   aws s3control put-public-access-block \\",
+            "     --account-id <account-id> \\",
+            "     --public-access-block-configuration \\",
+            "       BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true",
+            "",
+            "2. Vérifier configuration compte:",
+            "   aws s3control get-public-access-block --account-id <account-id>",
+            "",
+            "3. Activer sur bucket spécifique:",
+            "   aws s3api put-public-access-block \\",
+            "     --bucket <bucket-name> \\",
+            "     --public-access-block-configuration \\",
+            "       BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true",
+            "",
+            "4. Identifier buckets avec accès public:",
+            "   aws s3api list-buckets --query 'Buckets[].Name' --output text | \\",
+            "   while read bucket; do",
+            "     echo \"Checking $bucket\"",
+            "     aws s3api get-bucket-acl --bucket $bucket 2>/dev/null",
+            "     aws s3api get-bucket-policy-status --bucket $bucket 2>/dev/null",
+            "   done",
+            "",
+            "5. Utiliser AWS Config rules:",
+            "   - s3-bucket-public-read-prohibited",
+            "   - s3-bucket-public-write-prohibited",
+            "   - s3-account-level-public-access-blocks",
+            "",
+            "6. Alternative pour static website hosting:",
+            "   - Utiliser CloudFront avec Origin Access Identity (OAI)",
+            "   - Bucket reste privé",
+            "   - CloudFront sert le contenu publiquement",
+            "",
+            "7. Créer SCP pour bloquer désactivation:",
+            "   {",
+            '     "Effect": "Deny",',
+            '     "Action": [',
+            '       "s3:PutAccountPublicAccessBlock",',
+            '       "s3:PutBucketPublicAccessBlock"',
+            "     ],",
+            '     "Resource": "*",',
+            '     "Condition": {',
+            '       "StringNotEquals": {',
+            '         "s3:PublicAccessBlockConfiguration": "BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true"',
+            "       }",
+            "     }",
+            "   }",
+            "",
+            "8. Monitorer avec EventBridge:",
+            "   - Alerter sur PutBucketAcl vers public",
+            "   - Alerter sur PutBucketPolicy avec Principal:*"
+        ],
+        verification_steps=[
+            "Vérifier account-level settings:",
+            "  aws s3control get-public-access-block --account-id $(aws sts get-caller-identity --query Account --output text)",
+            "",
+            "Lister tous buckets avec public access:",
+            "  aws s3api list-buckets --query 'Buckets[].Name' --output text | while read bucket; do",
+            "    status=$(aws s3api get-bucket-policy-status --bucket $bucket --query 'PolicyStatus.IsPublic' 2>/dev/null)",
+            "    if [ \"$status\" = \"true\" ]; then",
+            "      echo \"PUBLIC: $bucket\"",
+            "    fi",
+            "  done",
+            "",
+            "Vérifier Block Public Access par bucket:",
+            "  aws s3api get-public-access-block --bucket <bucket-name>",
+            "",
+            "Utiliser S3 console (plus visuel):",
+            "  - Colonne 'Access' montre 'Public' ou 'Not public'",
+            "  - Filter par 'Public' pour voir expositions",
+            "",
+            "AWS Config compliance:",
+            "  aws configservice describe-compliance-by-config-rule \\",
+            "    --config-rule-names s3-bucket-public-read-prohibited s3-bucket-public-write-prohibited",
+            "",
+            "Macie findings (si activé):",
+            "  aws macie2 list-findings --finding-criteria 'criterion={category={eq=[POLICY_FINDINGS]}}'",
+            "",
+            "Access Analyzer findings:",
+            "  aws accessanalyzer list-findings --analyzer-arn <arn> --filter 'resourceType={eq=[AWS::S3::Bucket]}'"
+        ],
+        references=[
+            "https://docs.aws.amazon.com/AmazonS3/latest/userguide/access-control-block-public-access.html",
+            "https://aws.amazon.com/blogs/aws/amazon-s3-block-public-access-another-layer-of-protection-for-your-accounts-and-buckets/"
+        ]
+    ),
+
+    Question(
+        id="S3-002",
+        question="Chiffrement par défaut activé (SSE-S3 ou SSE-KMS) sur tous les buckets avec policies forçant chiffrement?",
+        description="Vérifier que default encryption est activée et que bucket policies refusent uploads non chiffrés",
+        severity="CRITICAL",
+        category="S3",
+        compliance=["PCI-DSS", "HIPAA", "GDPR", "ISO 27001"],
+        technical_details="""
+        Types de chiffrement S3:
+
+        1. SSE-S3 (Server-Side Encryption with S3-Managed Keys):
+           - AES-256
+           - Clés gérées par AWS
+           - Gratuit
+           - Rotation automatique clés
+           - Header: x-amz-server-side-encryption: AES256
+
+        2. SSE-KMS (Server-Side Encryption with AWS KMS):
+           - AES-256
+           - Clés gérées dans KMS (customer-managed ou AWS-managed)
+           - Audit trail dans CloudTrail (qui utilise quelle clé)
+           - Coût: $0.01 per 10,000 requests
+           - Contrôle d'accès granulaire via key policies
+           - Header: x-amz-server-side-encryption: aws:kms
+           - Rotation automatique optionnelle
+
+        3. SSE-C (Server-Side Encryption with Customer-Provided Keys):
+           - Client fournit clé dans chaque requête
+           - AWS ne stocke pas la clé
+           - Client gère rotation
+           - Complexe à opérer
+
+        4. Client-Side Encryption:
+           - Chiffrement avant upload
+           - AWS ne voit que données chiffrées
+           - Client gère clés et déchiffrement
+           - SDK S3 Encryption Client
+
+        Default Encryption:
+        - Appliqué automatiquement aux nouveaux objets
+        - N'affecte pas objets existants
+        - Peut être override par x-amz-server-side-encryption header
+        - Paramètre au niveau bucket
+
+        Bucket Policy pour forcer chiffrement:
+        - Deny PUT sans header encryption
+        - Peut spécifier type de chiffrement (SSE-S3 vs SSE-KMS)
+        - Peut exiger KMS key spécifique
+
+        Compliance requirements:
+        - PCI-DSS: chiffrement données sensibles
+        - HIPAA: chiffrement PHI (Protected Health Information)
+        - GDPR: protection données personnelles
+        - SOC2: contrôles accès et chiffrement
+
+        Performance impact:
+        - SSE-S3: négligeable
+        - SSE-KMS: latency due to KMS API calls
+        - Throughput limits KMS: 5500 req/s (peut demander augmentation)
+        """,
+        remediation=[
+            "1. Activer default encryption SSE-S3:",
+            "   aws s3api put-bucket-encryption --bucket <bucket-name> \\",
+            "     --server-side-encryption-configuration '{",
+            '       "Rules": [{',
+            '         "ApplyServerSideEncryptionByDefault": {',
+            '           "SSEAlgorithm": "AES256"',
+            "         },",
+            '         "BucketKeyEnabled": true',
+            "       }]",
+            "     }'",
+            "",
+            "2. Activer default encryption SSE-KMS:",
+            "   aws s3api put-bucket-encryption --bucket <bucket-name> \\",
+            "     --server-side-encryption-configuration '{",
+            '       "Rules": [{',
+            '         "ApplyServerSideEncryptionByDefault": {',
+            '           "SSEAlgorithm": "aws:kms",',
+            '           "KMSMasterKeyID": "arn:aws:kms:region:account:key/xxxx"',
+            "         },",
+            '         "BucketKeyEnabled": true',
+            "       }]",
+            "     }'",
+            "",
+            "   Note: BucketKeyEnabled réduit coûts KMS (moins de requests)",
+            "",
+            "3. Créer bucket policy forçant chiffrement:",
+            "   {",
+            '     "Version": "2012-10-17",',
+            '     "Statement": [{',
+            '       "Sid": "DenyUnencryptedObjectUploads",',
+            '       "Effect": "Deny",',
+            '       "Principal": "*",',
+            '       "Action": "s3:PutObject",',
+            '       "Resource": "arn:aws:s3:::<bucket-name>/*",',
+            '       "Condition": {',
+            '         "StringNotEquals": {',
+            '           "s3:x-amz-server-side-encryption": ["AES256", "aws:kms"]',
+            "         }",
+            "       }",
+            "     }]",
+            "   }",
+            "",
+            "4. Policy pour exiger KMS key spécifique:",
+            "   {",
+            '     "Sid": "RequireSpecificKMSKey",',
+            '     "Effect": "Deny",',
+            '     "Principal": "*",',
+            '     "Action": "s3:PutObject",',
+            '     "Resource": "arn:aws:s3:::<bucket-name>/*",',
+            '     "Condition": {',
+            '       "StringNotEqualsIfExists": {',
+            '         "s3:x-amz-server-side-encryption-aws-kms-key-id": "arn:aws:kms:region:account:key/xxxxx"',
+            "       }",
+            "     }",
+            "   }",
+            "",
+            "5. Chiffrer objets existants non chiffrés:",
+            "   aws s3 cp s3://<bucket>/ s3://<bucket>/ --recursive --sse AES256 --metadata-directive REPLACE",
+            "",
+            "   Ou avec KMS:",
+            "   aws s3 cp s3://<bucket>/ s3://<bucket>/ --recursive --sse aws:kms --sse-kms-key-id <key-id> --metadata-directive REPLACE",
+            "",
+            "6. Utiliser AWS Config rules:",
+            "   - s3-default-encryption-kms",
+            "   - s3-bucket-server-side-encryption-enabled",
+            "",
+            "7. Créer SCP pour bloquer création buckets non chiffrés:",
+            "   {",
+            '     "Effect": "Deny",',
+            '     "Action": "s3:CreateBucket",',
+            '     "Resource": "*",',
+            '     "Condition": {',
+            '       "StringNotEquals": {',
+            '         "s3:x-amz-server-side-encryption": ["AES256", "aws:kms"]',
+            "       }",
+            "     }",
+            "   }"
+        ],
+        verification_steps=[
+            "Vérifier default encryption bucket:",
+            "  aws s3api get-bucket-encryption --bucket <bucket-name>",
+            "",
+            "Lister buckets sans encryption:",
+            "  aws s3api list-buckets --query 'Buckets[].Name' --output text | while read bucket; do",
+            "    encryption=$(aws s3api get-bucket-encryption --bucket $bucket 2>&1)",
+            "    if echo $encryption | grep -q 'ServerSideEncryptionConfigurationNotFoundError'; then",
+            "      echo \"NO ENCRYPTION: $bucket\"",
+            "    fi",
+            "  done",
+            "",
+            "Vérifier objets non chiffrés dans bucket:",
+            "  aws s3api list-objects-v2 --bucket <bucket-name> --query 'Contents[?!ServerSideEncryption].[Key,Size]' --output table",
+            "",
+            "Vérifier bucket policy contient Deny unencrypted:",
+            "  aws s3api get-bucket-policy --bucket <bucket-name> --query Policy --output text | jq '.Statement[] | select(.Condition.StringNotEquals.\"s3:x-amz-server-side-encryption\")'",
+            "",
+            "Test upload sans encryption (devrait fail):",
+            "  aws s3 cp test.txt s3://<bucket>/  # Sans --sse flag",
+            "",
+            "AWS Config compliance:",
+            "  aws configservice describe-compliance-by-config-rule --config-rule-names s3-default-encryption-kms",
+            "",
+            "Macie inventory (si activé):",
+            "  aws macie2 describe-buckets --criteria '{\"encryptionType\":{\"eq\":[\"NONE\"]}}'",
+            "",
+            "CloudWatch metric pour objets non chiffrés:",
+            "  Créer custom metric via Lambda scannant buckets"
+        ],
+        references=[
+            "https://docs.aws.amazon.com/AmazonS3/latest/userguide/default-bucket-encryption.html",
+            "https://docs.aws.amazon.com/AmazonS3/latest/userguide/UsingKMSEncryption.html",
+            "https://aws.amazon.com/blogs/security/how-to-prevent-uploads-of-unencrypted-objects-to-amazon-s3/"
+        ]
+    )
+]
+
+# ==================== RDS & DATABASES ====================
+RDS_QUESTIONS = [
+    Question(
+        id="RDS-001",
+        question="Encryption at rest activée pour toutes instances RDS et Aurora avec KMS?",
+        description="Vérifier chiffrement RDS/Aurora au repos",
+        severity="CRITICAL",
+        category="RDS",
+        compliance=["PCI-DSS", "HIPAA", "GDPR"],
+        technical_details="RDS encryption at rest avec KMS, snapshots chiffrés",
+        remediation=["Activer encryption à la création", "Ou créer snapshot chiffré et restore"],
+        verification_steps=["aws rds describe-db-instances --query 'DBInstances[].[DBInstanceIdentifier,StorageEncrypted]'"],
+        references=["https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/Overview.Encryption.html"]
+    ),
+
+    Question(
+        id="RDS-002",
+        question="Multi-AZ deployment activé pour toutes DB de production avec failover automatique?",
+        description="Vérifier haute disponibilité RDS/Aurora avec Multi-AZ pour resilience et failover automatique",
+        severity="HIGH",
+        category="RDS",
+        compliance=["AWS Well-Architected", "SOC2", "ISO 27001"],
+        technical_details="""
+        Multi-AZ deployment pour haute disponibilité:
+
+        RDS Multi-AZ (non Aurora):
+        - Réplication synchrone vers standby dans AZ différente
+        - Failover automatique en 60-120 secondes
+        - Backups depuis standby (pas d'impact performance)
+        - Patching sur standby d'abord (downtime réduit)
+        - Endpoint DNS reste identique après failover
+
+        Aurora Multi-AZ:
+        - 6 copies des données across 3 AZs minimum
+        - Shared storage layer avec auto-healing
+        - Read replicas peuvent être promoted as writer
+        - Failover en 30 secondes typiquement
+        - Priorité de failover configurable par tier
+
+        Différence vs Single-AZ:
+        - Single-AZ: maintenance ou AZ failure = downtime
+        - Multi-AZ: maintenance sur standby = pas de downtime
+        - Multi-AZ: automatic failover sans intervention
+
+        Coût:
+        - Multi-AZ coûte ~2x prix Single-AZ
+        - Mais critique pour production workloads
+
+        Monitoring failover:
+        - CloudWatch metric: DatabaseConnections
+        - RDS Events: failover started, completed
+        - Enhanced Monitoring pour temps de failover
+        """,
+        remediation=[
+            "1. Activer Multi-AZ pour instance existante (downtime requis):",
+            "   aws rds modify-db-instance \\",
+            "     --db-instance-identifier mydb \\",
+            "     --multi-az \\",
+            "     --apply-immediately",
+            "",
+            "   Note: apply-immediately force outage. Sans flag, apply durant maintenance window",
+            "",
+            "2. Vérifier que toutes DB prod sont Multi-AZ:",
+            "   aws rds describe-db-instances \\",
+            "     --query 'DBInstances[?MultiAZ==`false`].[DBInstanceIdentifier,DBInstanceClass,Engine]' \\",
+            "     --output table",
+            "",
+            "3. Pour Aurora, créer replicas dans autres AZs:",
+            "   aws rds create-db-instance \\",
+            "     --db-instance-identifier mydb-replica-az2 \\",
+            "     --db-cluster-identifier mydb-cluster \\",
+            "     --db-instance-class db.r5.large \\",
+            "     --engine aurora-mysql \\",
+            "     --availability-zone us-east-1b",
+            "",
+            "4. Configurer failover priority pour Aurora:",
+            "   aws rds modify-db-instance \\",
+            "     --db-instance-identifier mydb-replica \\",
+            "     --promotion-tier 1",
+            "",
+            "   Tier 0-15: 0 = highest priority pour failover",
+            "",
+            "5. Tester failover (hors production d'abord!):",
+            "   aws rds reboot-db-instance \\",
+            "     --db-instance-identifier mydb \\",
+            "     --force-failover",
+            "",
+            "6. Créer alarme CloudWatch pour failover events:",
+            "   aws cloudwatch put-metric-alarm \\",
+            "     --alarm-name rds-failover-detection \\",
+            "     --alarm-description 'Alert on RDS failover' \\",
+            "     --metric-name DatabaseConnections \\",
+            "     --namespace AWS/RDS",
+            "",
+            "7. Tag production databases:",
+            "   aws rds add-tags-to-resource \\",
+            "     --resource-name arn:aws:rds:region:account:db:mydb \\",
+            "     --tags Key=Environment,Value=Production Key=RequiresMultiAZ,Value=true"
+        ],
+        verification_steps=[
+            "Lister toutes instances avec statut Multi-AZ:",
+            "  aws rds describe-db-instances \\",
+            "    --query 'DBInstances[].[DBInstanceIdentifier,MultiAZ,Engine,AvailabilityZone,SecondaryAvailabilityZone]' \\",
+            "    --output table",
+            "",
+            "Identifier instances prod sans Multi-AZ:",
+            "  aws rds describe-db-instances \\",
+            "    --query 'DBInstances[?MultiAZ==`false`].[DBInstanceIdentifier,Tags[?Key==`Environment`].Value|[0]]' \\",
+            "    --output table",
+            "",
+            "Pour Aurora, vérifier nombre replicas par AZ:",
+            "  aws rds describe-db-clusters \\",
+            "    --query 'DBClusters[].[DBClusterIdentifier,MultiAZ,AvailabilityZones]' \\",
+            "    --output table",
+            "",
+            "  aws rds describe-db-clusters --db-cluster-identifier mycluster \\",
+            "    --query 'DBClusters[0].DBClusterMembers[*].[DBInstanceIdentifier,PromotionTier,IsClusterWriter]'",
+            "",
+            "Vérifier failover tier Aurora:",
+            "  aws rds describe-db-instances \\",
+            "    --query 'DBInstances[].[DBInstanceIdentifier,PromotionTier]' \\",
+            "    --output table",
+            "",
+            "Historique des failovers (via RDS events):",
+            "  aws rds describe-events \\",
+            "    --source-type db-instance \\",
+            "    --source-identifier mydb \\",
+            "    --duration 10080 \\",
+            "    --query 'Events[?contains(Message,`failover`)].[Date,Message]' \\",
+            "    --output table",
+            "",
+            "Temps de failover moyen (via CloudWatch Insights):",
+            "  aws logs start-query \\",
+            "    --log-group-name /aws/rds/instance/mydb/error \\",
+            "    --start-time $(date -d '7 days ago' +%s) \\",
+            "    --end-time $(date +%s) \\",
+            "    --query-string 'fields @timestamp, @message | filter @message like /failover/'",
+            "",
+            "AWS Config rule pour Multi-AZ:",
+            "  aws configservice put-config-rule --config-rule '{",
+            '    "ConfigRuleName": "rds-multi-az-required",',
+            '    "Source": {',
+            '      "Owner": "AWS",',
+            '      "SourceIdentifier": "RDS_MULTI_AZ_SUPPORT"',
+            "    }",
+            "  }'"
+        ],
+        references=[
+            "https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/Concepts.MultiAZ.html",
+            "https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/Concepts.AuroraHighAvailability.html",
+            "https://aws.amazon.com/rds/features/multi-az/"
+        ]
+    ),
+
+    Question(
+        id="RDS-003",
+        question="Automated backups activés avec retention >= 7 jours, snapshots manuels cross-region?",
+        description="Vérifier stratégie de backup RDS/Aurora avec automated backups, retention adequat, et disaster recovery cross-region",
+        severity="CRITICAL",
+        category="RDS",
+        compliance=["PCI-DSS", "HIPAA", "SOC2", "ISO 27001"],
+        technical_details="""
+        RDS Backup strategy complète:
+
+        Automated Backups:
+        - Backup quotidien automatique du full DB + transaction logs
+        - Point-in-time recovery (PITR) à n'importe quelle seconde
+        - Retention: 0-35 jours (0 = désactivé, DANGER!)
+        - Stored dans S3 (multi-AZ automatique)
+        - Backup window configurable (maintenance)
+        - I/O suspension possible durant backup (pas avec Multi-AZ)
+
+        Manual Snapshots:
+        - Snapshots manuels conservés indéfiniment (jusqu'à suppression)
+        - Utile avant migrations, upgrades majeurs
+        - Peuvent être copiés vers autres régions (DR)
+        - Peuvent être partagés avec autres comptes AWS
+        - Snapshots chiffrés si source DB chiffrée
+
+        Aurora Backups:
+        - Continuous incremental backups vers S3
+        - Backup automatique sans impact performance
+        - Retention 1-35 jours
+        - Backtrack: retour en arrière sans restore (MySQL)
+
+        Cross-Region disaster recovery:
+        - Copie snapshots vers région secondaire
+        - Aurora Global Database pour réplication cross-region
+        - RTO/RPO à définir selon criticité
+
+        Backup encryption:
+        - Automated backups héritent encryption de source
+        - Impossible de chiffrer backup d'une DB non chiffrée
+        - Pour migrer: snapshot → copy chiffré → restore
+
+        Coût:
+        - Automated backups: gratuit jusqu'à 100% du storage provisionné
+        - Au-delà: $0.095/GB-month
+        - Manual snapshots: toujours payant
+        - Cross-region copy: transfer + storage
+        """,
+        remediation=[
+            "1. Activer automated backups si désactivé:",
+            "   aws rds modify-db-instance \\",
+            "     --db-instance-identifier mydb \\",
+            "     --backup-retention-period 7 \\",
+            "     --preferred-backup-window '03:00-04:00' \\",
+            "     --apply-immediately",
+            "",
+            "2. Augmenter retention à 30 jours pour prod critical:",
+            "   aws rds modify-db-instance \\",
+            "     --db-instance-identifier mydb-prod \\",
+            "     --backup-retention-period 30",
+            "",
+            "3. Créer snapshot manuel avant maintenance:",
+            "   aws rds create-db-snapshot \\",
+            "     --db-instance-identifier mydb \\",
+            "     --db-snapshot-identifier mydb-before-upgrade-$(date +%Y%m%d)",
+            "",
+            "4. Copier snapshot vers région secondaire (DR):",
+            "   aws rds copy-db-snapshot \\",
+            "     --source-db-snapshot-identifier arn:aws:rds:us-east-1:account:snapshot:mydb-snap \\",
+            "     --target-db-snapshot-identifier mydb-snap-dr \\",
+            "     --region us-west-2 \\",
+            "     --kms-key-id arn:aws:kms:us-west-2:account:key/xxxx",
+            "",
+            "   Note: KMS key doit exister dans target region",
+            "",
+            "5. Automatiser cross-region backup via Lambda:",
+            "   # Lambda triggered daily par EventBridge",
+            "   # Copy latest automated backup to DR region",
+            "",
+            "6. Partager snapshot avec autre compte (backup isolation):",
+            "   aws rds modify-db-snapshot-attribute \\",
+            "     --db-snapshot-identifier mydb-snap \\",
+            "     --attribute-name restore \\",
+            "     --values-to-add 123456789012",
+            "",
+            "7. Restore DB depuis snapshot (test DR!):",
+            "   aws rds restore-db-instance-from-db-snapshot \\",
+            "     --db-instance-identifier mydb-restored \\",
+            "     --db-snapshot-identifier mydb-snap",
+            "",
+            "8. Point-in-time restore à timestamp précis:",
+            "   aws rds restore-db-instance-to-point-in-time \\",
+            "     --source-db-instance-identifier mydb \\",
+            "     --target-db-instance-identifier mydb-pitr \\",
+            "     --restore-time 2024-01-15T14:30:00Z",
+            "",
+            "9. Aurora Backtrack (MySQL seulement):",
+            "   aws rds backtrack-db-cluster \\",
+            "     --db-cluster-identifier mycluster \\",
+            "     --backtrack-to 2024-01-15T14:00:00Z",
+            "",
+            "10. Tag snapshots pour lifecycle management:",
+            "    aws rds add-tags-to-resource \\",
+            "      --resource-name arn:aws:rds:region:account:snapshot:mydb-snap \\",
+            "      --tags Key=Retention,Value=90days Key=CriticalityLevel,Value=High"
+        ],
+        verification_steps=[
+            "Vérifier automated backup enabled et retention:",
+            "  aws rds describe-db-instances \\",
+            "    --query 'DBInstances[].[DBInstanceIdentifier,BackupRetentionPeriod,PreferredBackupWindow]' \\",
+            "    --output table",
+            "",
+            "Identifier DB sans backups (CRITICAL!):",
+            "  aws rds describe-db-instances \\",
+            "    --query 'DBInstances[?BackupRetentionPeriod==`0`].[DBInstanceIdentifier,Engine]' \\",
+            "    --output table",
+            "",
+            "Lister automated backups disponibles:",
+            "  aws rds describe-db-instance-automated-backups \\",
+            "    --db-instance-identifier mydb",
+            "",
+            "Lister manual snapshots:",
+            "  aws rds describe-db-snapshots \\",
+            "    --db-instance-identifier mydb \\",
+            "    --snapshot-type manual \\",
+            "    --query 'DBSnapshots[].[DBSnapshotIdentifier,SnapshotCreateTime,Encrypted,Status]' \\",
+            "    --output table",
+            "",
+            "Vérifier snapshots cross-region:",
+            "  aws rds describe-db-snapshots \\",
+            "    --region us-west-2 \\",
+            "    --query 'DBSnapshots[?contains(DBSnapshotIdentifier,`dr`)]' \\",
+            "    --output table",
+            "",
+            "Calculer earliest restore time (PITR):",
+            "  aws rds describe-db-instances \\",
+            "    --db-instance-identifier mydb \\",
+            "    --query 'DBInstances[0].[LatestRestorableTime,BackupRetentionPeriod]'",
+            "",
+            "Vérifier que snapshots sont chiffrés:",
+            "  aws rds describe-db-snapshots \\",
+            "    --query 'DBSnapshots[?Encrypted==`false`].[DBSnapshotIdentifier,SnapshotCreateTime]' \\",
+            "    --output table",
+            "",
+            "Tester restore (dans environnement test):",
+            "  # Créer snapshot",
+            "  # Restore vers nouvelle instance",
+            "  # Vérifier data integrity",
+            "  # Documenter RTO (Recovery Time Objective)",
+            "",
+            "Audit via AWS Config:",
+            "  aws configservice describe-compliance-by-config-rule \\",
+            "    --config-rule-names db-backup-enabled \\",
+            "    --compliance-types NON_COMPLIANT",
+            "",
+            "Snapshot age et freshness:",
+            "  aws rds describe-db-snapshots \\",
+            "    --query 'DBSnapshots[*].[DBSnapshotIdentifier,SnapshotCreateTime]' \\",
+            "    --output table | head -20"
+        ],
+        references=[
+            "https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_WorkingWithAutomatedBackups.html",
+            "https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_PIT.html",
+            "https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/Aurora.Managing.Backups.html",
+            "https://aws.amazon.com/blogs/database/implementing-a-disaster-recovery-strategy-with-amazon-rds/"
+        ]
+    ),
+
+    Question(
+        id="RDS-004",
+        question="DB parameter groups configurés avec SSL/TLS enforced, logging activé, et paramètres sécurisés?",
+        description="Vérifier DB parameter groups pour enforcer TLS, activer audit logging, et appliquer security best practices",
+        severity="HIGH",
+        category="RDS",
+        compliance=["PCI-DSS", "HIPAA", "SOC2", "CIS Benchmark"],
+        technical_details="""
+        RDS Parameter Groups security configuration:
+
+        SSL/TLS enforcement:
+        - require_secure_transport=ON (MySQL/MariaDB)
+        - rds.force_ssl=1 (PostgreSQL)
+        - Empêche connexions non chiffrées
+        - Client doit utiliser SSL pour se connecter
+
+        Audit logging (MySQL/MariaDB):
+        - server_audit_logging=1
+        - server_audit_events=CONNECT,QUERY_DDL,QUERY_DML
+        - Logs vers CloudWatch Logs
+
+        PostgreSQL logging:
+        - log_connections=1
+        - log_disconnections=1
+        - log_statement=ddl (ou all pour tout)
+        - log_min_duration_statement=1000 (log slow queries)
+
+        SQL Server auditing:
+        - Via native SQL Server Audit
+        - Logs vers S3
+
+        Autres paramètres sécurité:
+        - max_connections: limiter pour éviter DoS
+        - local_infile=0 (MySQL): empêcher LOAD DATA LOCAL
+        - log_bin_trust_function_creators=0
+
+        Parameter groups vs DB instance:
+        - Parameter group = template de config
+        - Peut être partagé entre plusieurs DB
+        - Changements nécessitent reboot (pour static params)
+        - Dynamic params: appliqués immédiatement
+
+        Custom vs default parameter groups:
+        - Toujours utiliser custom (default non modifiable)
+        - Permet versioning et rollback
+        - Tag parameter groups par environment
+        """,
+        remediation=[
+            "1. Créer custom parameter group:",
+            "   aws rds create-db-parameter-group \\",
+            "     --db-parameter-group-name mysql57-secure \\",
+            "     --db-parameter-group-family mysql5.7 \\",
+            "     --description 'Secure MySQL 5.7 configuration'",
+            "",
+            "2. Enforcer SSL/TLS pour MySQL:",
+            "   aws rds modify-db-parameter-group \\",
+            "     --db-parameter-group-name mysql57-secure \\",
+            "     --parameters 'ParameterName=require_secure_transport,ParameterValue=ON,ApplyMethod=immediate'",
+            "",
+            "3. Enforcer SSL pour PostgreSQL:",
+            "   aws rds modify-db-parameter-group \\",
+            "     --db-parameter-group-name postgres13-secure \\",
+            "     --parameters 'ParameterName=rds.force_ssl,ParameterValue=1,ApplyMethod=immediate'",
+            "",
+            "4. Activer audit logging MySQL:",
+            "   aws rds modify-db-parameter-group \\",
+            "     --db-parameter-group-name mysql57-secure \\",
+            "     --parameters \\",
+            "       'ParameterName=server_audit_logging,ParameterValue=1,ApplyMethod=immediate' \\",
+            "       'ParameterName=server_audit_events,ParameterValue=CONNECT,ApplyMethod=immediate'",
+            "",
+            "5. Activer logging PostgreSQL:",
+            "   aws rds modify-db-parameter-group \\",
+            "     --db-parameter-group-name postgres13-secure \\",
+            "     --parameters \\",
+            "       'ParameterName=log_connections,ParameterValue=1,ApplyMethod=immediate' \\",
+            "       'ParameterName=log_statement,ParameterValue=ddl,ApplyMethod=immediate'",
+            "",
+            "6. Appliquer parameter group à DB instance:",
+            "   aws rds modify-db-instance \\",
+            "     --db-instance-identifier mydb \\",
+            "     --db-parameter-group-name mysql57-secure \\",
+            "     --apply-immediately",
+            "",
+            "   Note: reboot requis pour static parameters",
+            "",
+            "7. Reboot pour appliquer changements:",
+            "   aws rds reboot-db-instance --db-instance-identifier mydb",
+            "",
+            "8. Exporter logs vers CloudWatch:",
+            "   aws rds modify-db-instance \\",
+            "     --db-instance-identifier mydb \\",
+            "     --cloudwatch-logs-export-configuration '{\"LogTypesToEnable\":[\"audit\",\"error\",\"general\",\"slowquery\"]}'",
+            "",
+            "9. Créer Config rule pour vérifier parameter groups:",
+            "   # Custom Config rule vérifiant require_secure_transport=ON"
+        ],
+        verification_steps=[
+            "Lister parameter groups custom:",
+            "  aws rds describe-db-parameter-groups \\",
+            "    --query 'DBParameterGroups[?!starts_with(DBParameterGroupName,`default`)]'",
+            "",
+            "Vérifier SSL enforced pour MySQL:",
+            "  aws rds describe-db-parameters \\",
+            "    --db-parameter-group-name mysql57-secure \\",
+            "    --query 'Parameters[?ParameterName==`require_secure_transport`].[ParameterValue]' \\",
+            "    --output text",
+            "",
+            "Vérifier SSL enforced pour PostgreSQL:",
+            "  aws rds describe-db-parameters \\",
+            "    --db-parameter-group-name postgres13-secure \\",
+            "    --query 'Parameters[?ParameterName==`rds.force_ssl`].[ParameterValue]' \\",
+            "    --output text",
+            "",
+            "Vérifier audit logging MySQL:",
+            "  aws rds describe-db-parameters \\",
+            "    --db-parameter-group-name mysql57-secure \\",
+            "    --query 'Parameters[?ParameterName==`server_audit_logging`].[ParameterValue]'",
+            "",
+            "Lister DB avec default parameter groups (NON CONFORME):",
+            "  aws rds describe-db-instances \\",
+            "    --query 'DBInstances[?starts_with(DBParameterGroups[0].DBParameterGroupName,`default`)].[DBInstanceIdentifier,DBParameterGroups[0].DBParameterGroupName]' \\",
+            "    --output table",
+            "",
+            "Vérifier CloudWatch Logs export enabled:",
+            "  aws rds describe-db-instances \\",
+            "    --query 'DBInstances[].[DBInstanceIdentifier,EnabledCloudwatchLogsExports]' \\",
+            "    --output table",
+            "",
+            "Tester connexion SSL (doit réussir):",
+            "  mysql -h mydb.xxxx.rds.amazonaws.com -u admin -p --ssl-mode=REQUIRED",
+            "",
+            "Tester connexion non-SSL (doit échouer si force_ssl):",
+            "  mysql -h mydb.xxxx.rds.amazonaws.com -u admin -p --ssl-mode=DISABLED",
+            "",
+            "Comparer parameter groups entre environnements:",
+            "  diff <(aws rds describe-db-parameters --db-parameter-group-name prod-params) \\",
+            "       <(aws rds describe-db-parameters --db-parameter-group-name dev-params)"
+        ],
+        references=[
+            "https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_WorkingWithParamGroups.html",
+            "https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/UsingWithRDS.SSL.html",
+            "https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_LogAccess.html"
+        ]
+    ),
+
+    Question(
+        id="RDS-005",
+        question="Auto minor version upgrade activé et maintenance window configurée pour automated patching?",
+        description="Vérifier automated patching RDS avec minor version upgrades et maintenance windows appropriées",
+        severity="MEDIUM",
+        category="RDS",
+        compliance=["CIS Benchmark", "AWS Well-Architected"],
+        technical_details="""
+        RDS Automated patching et maintenance:
+
+        Auto Minor Version Upgrade:
+        - Applique automatiquement patches sécurité mineurs
+        - Example: MySQL 5.7.30 → 5.7.31
+        - Appliqué durant maintenance window
+        - Recommandé ON pour production (sécurité > stabilité)
+
+        Maintenance Window:
+        - Fenêtre hebdomadaire de 30 min minimum
+        - Durant cette fenêtre: patches, upgrades, modifications
+        - Choisir heures creuses (ex: Dimanche 3-4 AM)
+        - Multi-AZ: patching sur standby d'abord (moins downtime)
+
+        Types de maintenance:
+        - Required: patches sécurité critiques (forcé)
+        - Available: upgrades optionnels (manuel)
+        - Next window: maintenance programmée
+
+        Major version upgrades:
+        - Jamais automatique (breaking changes possibles)
+        - Doit être fait manuellement
+        - Tester en non-prod d'abord!
+
+        Downtime durant patching:
+        - Single-AZ: downtime de quelques minutes
+        - Multi-AZ: minimal (failover vers standby patché)
+        - Aurora: rolling upgrades, quasi zero downtime
+
+        Deferring maintenance:
+        - Peut defer jusqu'à deadline AWS
+        - Après deadline: appliqué de force
+        """,
+        remediation=[
+            "1. Activer auto minor version upgrade:",
+            "   aws rds modify-db-instance \\",
+            "     --db-instance-identifier mydb \\",
+            "     --auto-minor-version-upgrade \\",
+            "     --apply-immediately",
+            "",
+            "2. Configurer maintenance window:",
+            "   aws rds modify-db-instance \\",
+            "     --db-instance-identifier mydb \\",
+            "     --preferred-maintenance-window sun:03:00-sun:04:00",
+            "",
+            "   Format: ddd:hh24:mi-ddd:hh24:mi (UTC)",
+            "",
+            "3. Appliquer maintenance immédiatement (test):",
+            "   aws rds apply-pending-maintenance-action \\",
+            "     --resource-identifier arn:aws:rds:region:account:db:mydb \\",
+            "     --apply-action system-update \\",
+            "     --opt-in-type immediate",
+            "",
+            "4. Vérifier pending maintenance actions:",
+            "   aws rds describe-pending-maintenance-actions",
+            "",
+            "5. Major version upgrade (manuel seulement!):",
+            "   # Test en non-prod d'abord!",
+            "   aws rds modify-db-instance \\",
+            "     --db-instance-identifier mydb \\",
+            "     --engine-version 8.0.28 \\",
+            "     --allow-major-version-upgrade \\",
+            "     --apply-immediately",
+            "",
+            "6. Créer alarme pour pending maintenance:",
+            "   # SNS notification quand maintenance programmée",
+            "",
+            "7. Documenter patching calendar:",
+            "   # Maintenance windows par environnement",
+            "   # Dev: Samedi 2 AM",
+            "   # Staging: Samedi 3 AM",
+            "   # Prod: Dimanche 3 AM"
+        ],
+        verification_steps=[
+            "Vérifier auto minor version upgrade status:",
+            "  aws rds describe-db-instances \\",
+            "    --query 'DBInstances[].[DBInstanceIdentifier,AutoMinorVersionUpgrade,PreferredMaintenanceWindow]' \\",
+            "    --output table",
+            "",
+            "Identifier DB sans auto upgrade (risque sécurité):",
+            "  aws rds describe-db-instances \\",
+            "    --query 'DBInstances[?AutoMinorVersionUpgrade==`false`].[DBInstanceIdentifier,Engine,EngineVersion]' \\",
+            "    --output table",
+            "",
+            "Vérifier pending maintenance actions:",
+            "  aws rds describe-pending-maintenance-actions \\",
+            "    --query 'PendingMaintenanceActions[].[ResourceIdentifier,PendingMaintenanceActionDetails[0].[Action,CurrentApplyDate]]' \\",
+            "    --output table",
+            "",
+            "Vérifier engine versions actuelles:",
+            "  aws rds describe-db-instances \\",
+            "    --query 'DBInstances[].[DBInstanceIdentifier,Engine,EngineVersion]' \\",
+            "    --output table",
+            "",
+            "Comparer avec latest available version:",
+            "  aws rds describe-db-engine-versions \\",
+            "    --engine mysql \\",
+            "    --engine-version 5.7 \\",
+            "    --query 'DBEngineVersions[0].ValidUpgradeTarget[*].EngineVersion'",
+            "",
+            "RDS events history (patches appliqués):",
+            "  aws rds describe-events \\",
+            "    --source-type db-instance \\",
+            "    --duration 10080 \\",
+            "    --query 'Events[?contains(Message,`upgrade`)||contains(Message,`patch`)].[Date,SourceIdentifier,Message]' \\",
+            "    --output table",
+            "",
+            "Maintenance windows par environnement:",
+            "  for env in dev staging prod; do",
+            "    echo \"=== $env ===\"",
+            "    aws rds describe-db-instances \\",
+            "      --filters Name=tag:Environment,Values=$env \\",
+            "      --query 'DBInstances[].[DBInstanceIdentifier,PreferredMaintenanceWindow]'",
+            "  done"
+        ],
+        references=[
+            "https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_UpgradeDBInstance.Maintenance.html",
+            "https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_UpgradeDBInstance.Upgrading.html"
+        ]
+    ),
+
+    Question(
+        id="RDS-006",
+        question="Enhanced Monitoring et Performance Insights activés pour monitoring détaillé et troubleshooting?",
+        description="Vérifier Enhanced Monitoring (OS metrics) et Performance Insights (DB performance) activés sur instances RDS",
+        severity="MEDIUM",
+        category="RDS",
+        compliance=["AWS Well-Architected"],
+        technical_details="""
+        RDS Monitoring avancé:
+
+        Enhanced Monitoring:
+        - Metrics OS-level en temps réel
+        - CPU, memory, file system, disk I/O
+        - Granularité: 1, 5, 10, 15, 30, 60 secondes
+        - Agent CloudWatch sur instance RDS (hypervisor level)
+        - Logs vers CloudWatch Logs
+        - Coût: selon granularité et volume logs
+
+        Metrics disponibles:
+        - cpuUtilization (par core)
+        - memory (used, free, cached)
+        - swap usage
+        - disk I/O (read/write throughput, IOPS)
+        - network throughput
+        - active processes
+
+        Performance Insights:
+        - DB load analysis et wait events
+        - Visualisation queries lentes
+        - Top SQL statements par latency/exec count
+        - Rétention: 7 jours gratuit, jusqu'à 2 ans payant
+        - Dashboard détaillé dans console
+
+        Métriques Performance Insights:
+        - DBLoad: nb sessions actives
+        - Wait events: CPU, I/O, lock, etc.
+        - Top queries par temps total
+        - Dimensions: SQL, wait, user, host
+
+        Différence CloudWatch vs Enhanced Monitoring:
+        - CloudWatch: métriques hypervisor-level
+        - Enhanced: métriques OS-level (plus précis)
+        - Enhanced peut voir processes, CloudWatch non
+
+        Use cases:
+        - Enhanced: troubleshooting performance, capacity planning
+        - Performance Insights: optimisation queries, DB tuning
+        - Alerting: CloudWatch Alarms sur métriques
+        """,
+        remediation=[
+            "1. Activer Enhanced Monitoring:",
+            "   aws rds modify-db-instance \\",
+            "     --db-instance-identifier mydb \\",
+            "     --monitoring-interval 60 \\",
+            "     --monitoring-role-arn arn:aws:iam::account:role/rds-monitoring-role",
+            "",
+            "   Granularité: 1,5,10,15,30,60 secondes",
+            "   Plus fréquent = plus coûteux",
+            "",
+            "2. Créer IAM role pour Enhanced Monitoring (si pas existe):",
+            "   aws iam create-role \\",
+            "     --role-name rds-monitoring-role \\",
+            "     --assume-role-policy-document '{",
+            '       "Version": "2012-10-17",',
+            '       "Statement": [{',
+            '         "Effect": "Allow",',
+            '         "Principal": {"Service": "monitoring.rds.amazonaws.com"},',
+            '         "Action": "sts:AssumeRole"',
+            "       }]",
+            "     }'",
+            "",
+            "   aws iam attach-role-policy \\",
+            "     --role-name rds-monitoring-role \\",
+            "     --policy-arn arn:aws:iam::aws:policy/service-role/AmazonRDSEnhancedMonitoringRole",
+            "",
+            "3. Activer Performance Insights:",
+            "   aws rds modify-db-instance \\",
+            "     --db-instance-identifier mydb \\",
+            "     --enable-performance-insights \\",
+            "     --performance-insights-retention-period 7",
+            "",
+            "   Retention: 7 jours (free) ou 731 jours (paid)",
+            "",
+            "4. Activer Performance Insights avec KMS:",
+            "   aws rds modify-db-instance \\",
+            "     --db-instance-identifier mydb \\",
+            "     --enable-performance-insights \\",
+            "     --performance-insights-kms-key-id arn:aws:kms:region:account:key/xxxx \\",
+            "     --performance-insights-retention-period 31",
+            "",
+            "5. Créer CloudWatch Alarm sur CPU élevé:",
+            "   aws cloudwatch put-metric-alarm \\",
+            "     --alarm-name rds-high-cpu \\",
+            "     --alarm-description 'RDS CPU > 80%' \\",
+            "     --metric-name CPUUtilization \\",
+            "     --namespace AWS/RDS \\",
+            "     --statistic Average \\",
+            "     --period 300 \\",
+            "     --evaluation-periods 2 \\",
+            "     --threshold 80 \\",
+            "     --comparison-operator GreaterThanThreshold \\",
+            "     --dimensions Name=DBInstanceIdentifier,Value=mydb",
+            "",
+            "6. Query Performance Insights via CLI:",
+            "   aws pi get-resource-metrics \\",
+            "     --service-type RDS \\",
+            "     --identifier db-XXXXX \\",
+            "     --metric-queries '[{\"Metric\":\"db.load.avg\"}]' \\",
+            "     --start-time 2024-01-15T00:00:00Z \\",
+            "     --end-time 2024-01-15T23:59:59Z \\",
+            "     --period-in-seconds 3600",
+            "",
+            "7. Exporter Enhanced Monitoring logs vers S3 (long-term):",
+            "   # Via Kinesis Firehose depuis CloudWatch Logs"
+        ],
+        verification_steps=[
+            "Vérifier Enhanced Monitoring status:",
+            "  aws rds describe-db-instances \\",
+            "    --query 'DBInstances[].[DBInstanceIdentifier,MonitoringInterval,MonitoringRoleArn]' \\",
+            "    --output table",
+            "",
+            "Identifier DB sans Enhanced Monitoring:",
+            "  aws rds describe-db-instances \\",
+            "    --query 'DBInstances[?MonitoringInterval==`0`].[DBInstanceIdentifier,DBInstanceClass]' \\",
+            "    --output table",
+            "",
+            "Vérifier Performance Insights status:",
+            "  aws rds describe-db-instances \\",
+            "    --query 'DBInstances[].[DBInstanceIdentifier,PerformanceInsightsEnabled,PerformanceInsightsRetentionPeriod]' \\",
+            "    --output table",
+            "",
+            "Lister DB sans Performance Insights:",
+            "  aws rds describe-db-instances \\",
+            "    --query 'DBInstances[?PerformanceInsightsEnabled==`false`].[DBInstanceIdentifier]' \\",
+            "    --output table",
+            "",
+            "Consulter Enhanced Monitoring logs CloudWatch:",
+            "  aws logs describe-log-groups --log-group-name-prefix RDSOSMetrics",
+            "",
+            "  aws logs tail RDSOSMetrics --follow",
+            "",
+            "Top queries via Performance Insights:",
+            "  # Via console: RDS > Performance Insights",
+            "  # ou API:",
+            "  aws pi describe-dimension-keys \\",
+            "    --service-type RDS \\",
+            "    --identifier db-XXXXX \\",
+            "    --metric db.load.avg \\",
+            "    --group-by '{\"Group\":\"db.sql\"}' \\",
+            "    --start-time 2024-01-15T00:00:00Z \\",
+            "    --end-time 2024-01-15T23:59:59Z \\",
+            "    --period-in-seconds 3600",
+            "",
+            "CloudWatch métriques RDS standards:",
+            "  aws cloudwatch get-metric-statistics \\",
+            "    --namespace AWS/RDS \\",
+            "    --metric-name CPUUtilization \\",
+            "    --dimensions Name=DBInstanceIdentifier,Value=mydb \\",
+            "    --start-time 2024-01-15T00:00:00Z \\",
+            "    --end-time 2024-01-15T23:59:59Z \\",
+            "    --period 3600 \\",
+            "    --statistics Average",
+            "",
+            "Vérifier alarmes configurées:",
+            "  aws cloudwatch describe-alarms --alarm-name-prefix rds-"
+        ],
+        references=[
+            "https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_Monitoring.OS.html",
+            "https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_PerfInsights.html",
+            "https://aws.amazon.com/rds/performance-insights/"
+        ]
+    )
+]
+
+# ==================== LAMBDA & SERVERLESS ====================
+LAMBDA_QUESTIONS = [
+    Question(
+        id="LAMBDA-001",
+        question="Lambda execution roles suivent principe least privilege, avec managed policies ou inline policies minimales?",
+        description="Vérifier IAM execution roles Lambda avec permissions strictement nécessaires, pas de wildcard excessif",
+        severity="HIGH",
+        category="Lambda",
+        compliance=["AWS Well-Architected", "CIS Benchmark", "SOC2"],
+        technical_details="""
+        Lambda IAM Execution Role security:
+
+        Execution Role:
+        - IAM role assumé par Lambda lors de l'exécution
+        - Définit les permissions AWS services que Lambda peut utiliser
+        - Trust policy permettant lambda.amazonaws.com d'assume role
+
+        Principe Least Privilege:
+        - Permissions minimales strictement nécessaires
+        - Éviter AmazonLambdaFullAccess ou policies wildcard
+        - Scope resources avec ARNs spécifiques
+        - Utiliser conditions IAM quand possible
+
+        Policies communes (mais trop permissives):
+        - AWSLambdaBasicExecutionRole: logs CloudWatch (OK)
+        - AWSLambdaVPCAccessExecutionRole: ENI VPC (OK si VPC)
+        - AWSLambdaFullAccess: TROP PERMISSIF, ne jamais utiliser
+
+        Best practices:
+        - Un role par fonction ou groupe de fonctions similaires
+        - Inline policies pour permissions spécifiques
+        - Resource-based policies pour cross-account access
+        - Monitorer avec CloudTrail & Access Analyzer
+
+        Resource-based policies:
+        - Contrôle qui peut invoke la fonction
+        - S3, SNS, EventBridge peuvent invoke avec resource policy
+        - Préférer resource policy à IAM role pour cross-account
+
+        Permission boundaries:
+        - Limite maximale de permissions qu'un role peut avoir
+        - Utile dans organisations multi-équipes
+        """,
+        remediation=[
+            "1. Créer execution role minimal pour Lambda logging:",
+            "   aws iam create-role \\",
+            "     --role-name lambda-basic-execution \\",
+            "     --assume-role-policy-document '{",
+            '       "Version": "2012-10-17",',
+            '       "Statement": [{',
+            '         "Effect": "Allow",',
+            '         "Principal": {"Service": "lambda.amazonaws.com"},',
+            '         "Action": "sts:AssumeRole"',
+            "       }]",
+            "     }'",
+            "",
+            "   aws iam attach-role-policy \\",
+            "     --role-name lambda-basic-execution \\",
+            "     --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole",
+            "",
+            "2. Créer inline policy pour DynamoDB (exemple):",
+            "   aws iam put-role-policy \\",
+            "     --role-name lambda-dynamodb-reader \\",
+            "     --policy-name ReadDynamoDBTable \\",
+            "     --policy-document '{",
+            '       "Version": "2012-10-17",',
+            '       "Statement": [{',
+            '         "Effect": "Allow",',
+            '         "Action": ["dynamodb:GetItem", "dynamodb:Query"],',
+            '         "Resource": "arn:aws:dynamodb:us-east-1:account:table/MyTable"',
+            "       }]",
+            "     }'",
+            "",
+            "3. Attacher role à fonction Lambda:",
+            "   aws lambda create-function \\",
+            "     --function-name myfunction \\",
+            "     --runtime python3.11 \\",
+            "     --role arn:aws:iam::account:role/lambda-basic-execution \\",
+            "     --handler index.handler \\",
+            "     --zip-file fileb://function.zip",
+            "",
+            "4. Update existing function avec nouveau role:",
+            "   aws lambda update-function-configuration \\",
+            "     --function-name myfunction \\",
+            "     --role arn:aws:iam::account:role/lambda-minimal-role",
+            "",
+            "5. Ajouter resource-based policy (allow S3 invoke):",
+            "   aws lambda add-permission \\",
+            "     --function-name myfunction \\",
+            "     --statement-id s3-invoke \\",
+            "     --action lambda:InvokeFunction \\",
+            "     --principal s3.amazonaws.com \\",
+            "     --source-arn arn:aws:s3:::mybucket",
+            "",
+            "6. Utiliser IAM Access Analyzer pour trouver overly permissive roles:",
+            "   aws accessanalyzer list-findings \\",
+            "     --analyzer-arn arn:aws:access-analyzer:region:account:analyzer/ConsoleAnalyzer",
+            "",
+            "7. Créer permission boundary:",
+            "   aws iam put-role-permissions-boundary \\",
+            "     --role-name lambda-dev-role \\",
+            "     --permissions-boundary arn:aws:iam::account:policy/LambdaPermissionBoundary"
+        ],
+        verification_steps=[
+            "Lister toutes Lambda functions et leurs roles:",
+            "  aws lambda list-functions \\",
+            "    --query 'Functions[].[FunctionName,Role]' \\",
+            "    --output table",
+            "",
+            "Vérifier policies attachées au role:",
+            "  ROLE_NAME=$(aws lambda get-function --function-name myfunction --query 'Configuration.Role' --output text | awk -F'/' '{print $NF}')",
+            "",
+            "  aws iam list-attached-role-policies --role-name $ROLE_NAME",
+            "  aws iam list-role-policies --role-name $ROLE_NAME",
+            "",
+            "Identifier functions avec policies trop permissives:",
+            "  for func in $(aws lambda list-functions --query 'Functions[].FunctionName' --output text); do",
+            "    role=$(aws lambda get-function --function-name $func --query 'Configuration.Role' --output text)",
+            "    role_name=$(echo $role | awk -F'/' '{print $NF}')",
+            "    policies=$(aws iam list-attached-role-policies --role-name $role_name --query 'AttachedPolicies[].PolicyName' --output text)",
+            "    if echo $policies | grep -q 'FullAccess\\|Admin'; then",
+            "      echo \"OVERPERMISSIVE: $func - $role_name - $policies\"",
+            "    fi",
+            "  done",
+            "",
+            "Obtenir policy document:",
+            "  aws iam get-role-policy --role-name lambda-role --policy-name MyPolicy",
+            "",
+            "Vérifier resource-based policy de la fonction:",
+            "  aws lambda get-policy --function-name myfunction",
+            "",
+            "Vérifier dernière utilisation des permissions (CloudTrail):",
+            "  aws cloudtrail lookup-events \\",
+            "    --lookup-attributes AttributeKey=Username,AttributeValue=lambda-role \\",
+            "    --max-results 50",
+            "",
+            "IAM Access Analyzer findings:",
+            "  aws accessanalyzer list-findings \\",
+            "    --analyzer-arn arn:aws:access-analyzer:region:account:analyzer/ConsoleAnalyzer \\",
+            "    --filter '{\"resourceType\":{\"eq\":[\"AWS::Lambda::Function\"]}}'",
+            "",
+            "Vérifier permission boundaries:",
+            "  aws iam get-role --role-name lambda-role --query 'Role.PermissionsBoundary'"
+        ],
+        references=[
+            "https://docs.aws.amazon.com/lambda/latest/dg/lambda-intro-execution-role.html",
+            "https://docs.aws.amazon.com/lambda/latest/dg/access-control-resource-based.html",
+            "https://docs.aws.amazon.com/IAM/latest/UserGuide/access_policies_boundaries.html"
+        ]
+    ),
+
+    Question(
+        id="LAMBDA-002",
+        question="Secrets (credentials, API keys) stockés dans Secrets Manager ou Parameter Store avec encryption KMS, pas en environment variables?",
+        description="Vérifier que secrets Lambda utilisent Secrets Manager/Parameter Store chiffrés KMS au lieu de plaintext env vars",
+        severity="CRITICAL",
+        category="Lambda",
+        compliance=["PCI-DSS", "HIPAA", "SOC2", "ISO 27001"],
+        technical_details="""
+        Lambda Secrets Management:
+
+        Problèmes avec environment variables:
+        - Visibles en plaintext dans console Lambda
+        - Apparaissent dans CloudTrail logs
+        - Stockées non chiffrées par défaut
+        - Accessibles à quiconque a lambda:GetFunction
+        - Max 4KB de env vars total
+
+        AWS Secrets Manager:
+        - Stockage chiffré avec KMS
+        - Rotation automatique des credentials
+        - Versioning des secrets
+        - Fine-grained IAM access control
+        - Audit via CloudTrail
+        - Coût: $0.40/secret/month + $0.05 per 10k API calls
+
+        AWS Systems Manager Parameter Store:
+        - Standard parameters: gratuit
+        - SecureString: chiffrement KMS
+        - Advanced parameters: 8KB max
+        - Parameter hierarchies (/prod/db/password)
+        - Parameter policies (expiration, notification)
+
+        Retrieval depuis Lambda:
+        - SDK call dans function code (boto3)
+        - Lambda extension pour caching local
+        - Reduce latency avec caching
+        - IAM permissions requises sur secret
+
+        Best practices:
+        - Un secret par credential/API key
+        - Rotation automatique (RDS, Aurora)
+        - Caching dans Lambda avec TTL court
+        - Monitorer accès avec CloudTrail
+        - Utiliser VPC endpoints pour Secrets Manager
+
+        Lambda extension for parameters:
+        - AWS Parameters and Secrets Lambda Extension
+        - Cache local dans /tmp
+        - HTTP API local (localhost:2773)
+        - Réduit latency & coût API calls
+        """,
+        remediation=[
+            "1. Créer secret dans Secrets Manager:",
+            "   aws secretsmanager create-secret \\",
+            "     --name prod/myapp/dbpassword \\",
+            "     --description 'Production database password' \\",
+            "     --secret-string '{\"username\":\"admin\",\"password\":\"xxx\",\"host\":\"db.example.com\"}'",
+            "",
+            "2. Créer secret avec KMS key spécifique:",
+            "   aws secretsmanager create-secret \\",
+            "     --name prod/api-key \\",
+            "     --kms-key-id arn:aws:kms:region:account:key/xxxx \\",
+            "     --secret-string 'my-api-key-value'",
+            "",
+            "3. Créer SecureString dans Parameter Store:",
+            "   aws ssm put-parameter \\",
+            "     --name /prod/myapp/dbpassword \\",
+            "     --value 'mypassword' \\",
+            "     --type SecureString \\",
+            "     --key-id alias/aws/ssm \\",
+            "     --description 'DB password'",
+            "",
+            "4. Ajouter IAM permissions au Lambda role:",
+            "   {",
+            '     "Effect": "Allow",',
+            '     "Action": [',
+            '       "secretsmanager:GetSecretValue",',
+            '       "kms:Decrypt"',
+            "     ],",
+            '     "Resource": [',
+            '       "arn:aws:secretsmanager:region:account:secret:prod/myapp/*",',
+            '       "arn:aws:kms:region:account:key/xxxx"',
+            "     ]",
+            "   }",
+            "",
+            "5. Retrieval dans Lambda code (Python):",
+            "   import boto3",
+            "   import json",
+            "",
+            "   client = boto3.client('secretsmanager')",
+            "   response = client.get_secret_value(SecretId='prod/myapp/dbpassword')",
+            "   secret = json.loads(response['SecretString'])",
+            "   db_password = secret['password']",
+            "",
+            "6. Avec caching pour réduire coût:",
+            "   import boto3",
+            "   from functools import lru_cache",
+            "",
+            "   @lru_cache(maxsize=1)",
+            "   def get_secret():",
+            "       client = boto3.client('secretsmanager')",
+            "       return client.get_secret_value(SecretId='prod/myapp/dbpassword')",
+            "",
+            "7. Utiliser Lambda Extension (alternative):",
+            "   # Ajouter layer: arn:aws:lambda:region:AWS_ACCOUNT:layer:AWS-Parameters-and-Secrets-Lambda-Extension:VERSION",
+            "   # Dans code:",
+            "   import requests",
+            "   url = 'http://localhost:2773/secretsmanager/get?secretId=prod/myapp/dbpassword'",
+            "   headers = {'X-Aws-Parameters-Secrets-Token': os.environ['AWS_SESSION_TOKEN']}",
+            "   response = requests.get(url, headers=headers)",
+            "",
+            "8. Activer rotation automatique:",
+            "   aws secretsmanager rotate-secret \\",
+            "     --secret-id prod/myapp/dbpassword \\",
+            "     --rotation-lambda-arn arn:aws:lambda:region:account:function:SecretsManagerRotation \\",
+            "     --rotation-rules AutomaticallyAfterDays=30"
+        ],
+        verification_steps=[
+            "Lister functions avec environment variables (suspects):",
+            "  aws lambda list-functions \\",
+            "    --query 'Functions[?Environment!=`null`].[FunctionName,Environment.Variables]' \\",
+            "    --output json",
+            "",
+            "Identifier env vars contenant mots-clés sensibles:",
+            "  for func in $(aws lambda list-functions --query 'Functions[].FunctionName' --output text); do",
+            "    env_vars=$(aws lambda get-function-configuration --function-name $func --query 'Environment.Variables' --output json 2>/dev/null)",
+            "    if echo $env_vars | grep -iE 'password|secret|key|token|credential' > /dev/null; then",
+            "      echo \"POTENTIAL SECRET in $func: $env_vars\"",
+            "    fi",
+            "  done",
+            "",
+            "Lister secrets dans Secrets Manager:",
+            "  aws secretsmanager list-secrets --query 'SecretList[].[Name,KmsKeyId,LastAccessedDate]' --output table",
+            "",
+            "Vérifier quelles Lambda ont accès Secrets Manager:",
+            "  for func in $(aws lambda list-functions --query 'Functions[].FunctionName' --output text); do",
+            "    role=$(aws lambda get-function --function-name $func --query 'Configuration.Role' --output text | awk -F'/' '{print $NF}')",
+            "    policies=$(aws iam get-role-policy --role-name $role --policy-name SecretsManagerAccess 2>/dev/null)",
+            "    if [ $? -eq 0 ]; then",
+            "      echo \"$func has Secrets Manager access\"",
+            "    fi",
+            "  done",
+            "",
+            "Vérifier accès aux secrets via CloudTrail:",
+            "  aws cloudtrail lookup-events \\",
+            "    --lookup-attributes AttributeKey=EventName,AttributeValue=GetSecretValue \\",
+            "    --max-results 50",
+            "",
+            "Lister SecureString parameters:",
+            "  aws ssm describe-parameters \\",
+            "    --query 'Parameters[?Type==`SecureString`].[Name,KeyId,LastModifiedDate]' \\",
+            "    --output table",
+            "",
+            "Audit rotation des secrets:",
+            "  aws secretsmanager describe-secret --secret-id prod/myapp/dbpassword \\",
+            "    --query '[RotationEnabled,RotationLambdaARN,RotationRules]'",
+            "",
+            "Vérifier KMS key utilisée:",
+            "  aws secretsmanager describe-secret --secret-id prod/myapp/dbpassword \\",
+            "    --query 'KmsKeyId'"
+        ],
+        references=[
+            "https://docs.aws.amazon.com/secretsmanager/latest/userguide/intro.html",
+            "https://docs.aws.amazon.com/systems-manager/latest/userguide/systems-manager-parameter-store.html",
+            "https://docs.aws.amazon.com/secretsmanager/latest/userguide/retrieving-secrets_lambda.html"
+        ]
+    ),
+
+    Question(
+        id="LAMBDA-003",
+        question="Lambda functions dans VPC avec security groups restrictifs si accès ressources privées (RDS, ElastiCache)?",
+        description="Vérifier configuration VPC Lambda pour accès sécurisé aux ressources privées avec SG appropriés",
+        severity="HIGH",
+        category="Lambda",
+        compliance=["AWS Well-Architected", "CIS Benchmark"],
+        technical_details="""
+        Lambda VPC configuration:
+
+        Quand utiliser VPC:
+        - Accès RDS/Aurora dans VPC privé
+        - Accès ElastiCache, Redshift
+        - Accès ressources on-premise via VPN/Direct Connect
+        - Compliance requiert network isolation
+
+        Quand ne PAS utiliser VPC:
+        - Accès uniquement services publics AWS (S3, DynamoDB, etc.)
+        - Meilleure performance (no cold start VPC ENI)
+        - Utiliser VPC endpoints pour S3/DynamoDB si needed
+
+        VPC Lambda architecture:
+        - Lambda crée ENI (Elastic Network Interface) dans subnets
+        - ENI persistent après cold start (depuis 2019 improvement)
+        - Un ENI partagé par multiples concurrent executions
+        - Attaché aux security groups spécifiés
+
+        Cold start considerations:
+        - Premier invoke: 10-30s pour créer ENI (pre-2019)
+        - Maintenant: ENI préalloués, cold start minimal
+        - Hyperplane ENIs: partage cross-functions
+
+        Security Groups:
+        - Outbound: autoriser accès RDS, ElastiCache (port 3306, 6379, etc.)
+        - Inbound: généralement vide (Lambda initie connections)
+        - SG du RDS doit autoriser inbound depuis SG Lambda
+
+        Subnets:
+        - Utiliser private subnets (pas d'IGW direct)
+        - Minimum 2 subnets dans 2 AZs (HA)
+        - NAT Gateway requis si Lambda doit accéder internet
+
+        Internet access depuis VPC Lambda:
+        - Route via NAT Gateway dans subnet public
+        - Ou VPC endpoints pour services AWS (S3, DynamoDB, etc.)
+        - PrivateLink endpoints pour Secrets Manager, etc.
+
+        IAM permissions requises:
+        - ec2:CreateNetworkInterface
+        - ec2:DescribeNetworkInterfaces
+        - ec2:DeleteNetworkInterface
+        - AWSLambdaVPCAccessExecutionRole managed policy
+
+        Best practices:
+        - Dédier subnets pour Lambda uniquement
+        - Prévoir suffisamment d'IPs (/24 minimum)
+        - Monitorer ENI utilization
+        """,
+        remediation=[
+            "1. Créer security group pour Lambda:",
+            "   aws ec2 create-security-group \\",
+            "     --group-name lambda-sg \\",
+            "     --description 'Security group for Lambda functions' \\",
+            "     --vpc-id vpc-xxxxx",
+            "",
+            "2. Autoriser outbound vers RDS (exemple):",
+            "   aws ec2 authorize-security-group-egress \\",
+            "     --group-id sg-lambda \\",
+            "     --protocol tcp \\",
+            "     --port 3306 \\",
+            "     --source-group sg-rds",
+            "",
+            "3. Update RDS security group (inbound depuis Lambda):",
+            "   aws ec2 authorize-security-group-ingress \\",
+            "     --group-id sg-rds \\",
+            "     --protocol tcp \\",
+            "     --port 3306 \\",
+            "     --source-group sg-lambda",
+            "",
+            "4. Ajouter Lambda au VPC:",
+            "   aws lambda update-function-configuration \\",
+            "     --function-name myfunction \\",
+            "     --vpc-config SubnetIds=subnet-xxx,subnet-yyy,SecurityGroupIds=sg-lambda",
+            "",
+            "5. Ajouter VPC execution permissions au role:",
+            "   aws iam attach-role-policy \\",
+            "     --role-name lambda-vpc-role \\",
+            "     --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole",
+            "",
+            "6. Créer VPC endpoint pour S3 (éviter NAT Gateway):",
+            "   aws ec2 create-vpc-endpoint \\",
+            "     --vpc-id vpc-xxxxx \\",
+            "     --service-name com.amazonaws.region.s3 \\",
+            "     --route-table-ids rtb-xxxxx",
+            "",
+            "7. Créer VPC endpoint pour Secrets Manager:",
+            "   aws ec2 create-vpc-endpoint \\",
+            "     --vpc-id vpc-xxxxx \\",
+            "     --vpc-endpoint-type Interface \\",
+            "     --service-name com.amazonaws.region.secretsmanager \\",
+            "     --subnet-ids subnet-xxx subnet-yyy \\",
+            "     --security-group-ids sg-endpoints",
+            "",
+            "8. Remove Lambda from VPC (si plus nécessaire):",
+            "   aws lambda update-function-configuration \\",
+            "     --function-name myfunction \\",
+            "     --vpc-config SubnetIds=[],SecurityGroupIds=[]"
+        ],
+        verification_steps=[
+            "Lister Lambda functions avec VPC config:",
+            "  aws lambda list-functions \\",
+            "    --query 'Functions[?VpcConfig.VpcId!=`null`].[FunctionName,VpcConfig.VpcId,VpcConfig.SubnetIds,VpcConfig.SecurityGroupIds]' \\",
+            "    --output table",
+            "",
+            "Identifier functions SANS VPC mais accédant RDS:",
+            "  # Nécessite analyse code ou environnement",
+            "  for func in $(aws lambda list-functions --query 'Functions[?VpcConfig.VpcId==`null`].FunctionName' --output text); do",
+            "    env=$(aws lambda get-function-configuration --function-name $func --query 'Environment.Variables' --output json)",
+            "    if echo $env | grep -iE 'rds|database|db_host' > /dev/null; then",
+            "      echo \"POTENTIAL ISSUE: $func accesses RDS but not in VPC\"",
+            "    fi",
+            "  done",
+            "",
+            "Vérifier security groups Lambda:",
+            "  aws lambda get-function-configuration --function-name myfunction \\",
+            "    --query 'VpcConfig.SecurityGroupIds'",
+            "",
+            "Inspecter security group rules:",
+            "  SG_ID=$(aws lambda get-function-configuration --function-name myfunction --query 'VpcConfig.SecurityGroupIds[0]' --output text)",
+            "  aws ec2 describe-security-groups --group-ids $SG_ID",
+            "",
+            "Vérifier subnets utilisés:",
+            "  aws lambda get-function-configuration --function-name myfunction \\",
+            "    --query 'VpcConfig.SubnetIds[]' --output table",
+            "",
+            "Vérifier disponibilité IPs dans subnets Lambda:",
+            "  for subnet in subnet-xxx subnet-yyy; do",
+            "    aws ec2 describe-subnets --subnet-ids $subnet \\",
+            "      --query 'Subnets[].[SubnetId,AvailableIpAddressCount,CidrBlock]'",
+            "  done",
+            "",
+            "Vérifier NAT Gateway pour internet access:",
+            "  aws ec2 describe-nat-gateways \\",
+            "    --filter Name=vpc-id,Values=vpc-xxxxx \\",
+            "    --query 'NatGateways[].[NatGatewayId,State,SubnetId]'",
+            "",
+            "Lister VPC endpoints configurés:",
+            "  aws ec2 describe-vpc-endpoints \\",
+            "    --filters Name=vpc-id,Values=vpc-xxxxx \\",
+            "    --query 'VpcEndpoints[].[VpcEndpointId,ServiceName,State]' \\",
+            "    --output table",
+            "",
+            "Vérifier ENI créées par Lambda:",
+            "  aws ec2 describe-network-interfaces \\",
+            "    --filters Name=description,Values='AWS Lambda VPC ENI*' \\",
+            "    --query 'NetworkInterfaces[].[NetworkInterfaceId,Status,PrivateIpAddress,SubnetId]'"
+        ],
+        references=[
+            "https://docs.aws.amazon.com/lambda/latest/dg/configuration-vpc.html",
+            "https://aws.amazon.com/blogs/compute/announcing-improved-vpc-networking-for-aws-lambda-functions/",
+            "https://docs.aws.amazon.com/lambda/latest/dg/configuration-vpc-endpoints.html"
+        ]
+    ),
+
+    Question(
+        id="LAMBDA-004",
+        question="Reserved concurrency configurée pour functions critiques et throttling pour éviter runaway costs?",
+        description="Vérifier gestion concurrence Lambda avec reserved concurrency, provisioned concurrency, et limites appropriées",
+        severity="MEDIUM",
+        category="Lambda",
+        compliance=["AWS Well-Architected", "FinOps"],
+        technical_details="""
+        Lambda Concurrency Management:
+
+        Account-level concurrency limit:
+        - Default: 1000 concurrent executions par région
+        - Peut être augmenté via support ticket
+        - Partagé entre toutes fonctions dans région
+
+        Reserved Concurrency:
+        - Réserve un pool de concurrency pour fonction
+        - Garantit que fonction peut scale jusqu'à ce nombre
+        - Réduit concurrency disponible pour autres fonctions
+        - Use case: fonctions critiques, SLA garantees
+
+        Unreserved Concurrency:
+        - Pool partagé: account limit - sum(reserved)
+        - Minimum 100 pour unreserved pool
+        - Fonctions sans reserved puisent dans ce pool
+
+        Provisioned Concurrency:
+        - Pre-warm instances toujours prêts
+        - Zero cold start latency
+        - Coût: $0.015/GB-hour provisioned
+        - Use case: latency-sensitive APIs, real-time
+
+        Throttling behavior:
+        - Si concurrency dépassée: HTTP 429 TooManyRequestsException
+        - Synchronous invoke: erreur au client
+        - Asynchronous (SQS, SNS): retry automatique 2x, puis DLQ
+        - Event source (Kinesis, DynamoDB): retries jusqu'à data expiration
+
+        Burst concurrency:
+        - Initial burst: 3000 (us-east-1, us-west-2, eu-west-1)
+        - Initial burst: 1000 (autres régions)
+        - Puis: +500 per minute
+
+        Cost implications:
+        - Runaway concurrency = runaway costs
+        - Mettre reserved concurrency pour cap costs
+        - Monitorer ConcurrentExecutions metric
+
+        Monitoring:
+        - CloudWatch: ConcurrentExecutions
+        - CloudWatch: Throttles
+        - CloudWatch: UnreservedConcurrentExecutions
+        """,
+        remediation=[
+            "1. Vérifier account-level concurrency limit:",
+            "   aws service-quotas get-service-quota \\",
+            "     --service-code lambda \\",
+            "     --quota-code L-B99A9384",
+            "",
+            "2. Demander augmentation limite (si nécessaire):",
+            "   aws service-quotas request-service-quota-increase \\",
+            "     --service-code lambda \\",
+            "     --quota-code L-B99A9384 \\",
+            "     --desired-value 3000",
+            "",
+            "3. Set reserved concurrency pour fonction critique:",
+            "   aws lambda put-function-concurrency \\",
+            "     --function-name critical-function \\",
+            "     --reserved-concurrent-executions 100",
+            "",
+            "   Note: garantit 100 concurrent executions disponibles",
+            "",
+            "4. Set reserved concurrency pour limiter coût:",
+            "   aws lambda put-function-concurrency \\",
+            "     --function-name dev-function \\",
+            "     --reserved-concurrent-executions 10",
+            "",
+            "   Cap à 10 concurrent executions (cost control)",
+            "",
+            "5. Remove reserved concurrency:",
+            "   aws lambda delete-function-concurrency --function-name myfunction",
+            "",
+            "6. Configure provisioned concurrency:",
+            "   aws lambda put-provisioned-concurrency-config \\",
+            "     --function-name api-function \\",
+            "     --provisioned-concurrent-executions 50 \\",
+            "     --qualifier prod",
+            "",
+            "   Note: nécessite function version ou alias",
+            "",
+            "7. Auto-scaling provisioned concurrency:",
+            "   aws application-autoscaling register-scalable-target \\",
+            "     --service-namespace lambda \\",
+            "     --resource-id function:api-function:prod \\",
+            "     --scalable-dimension lambda:function:ProvisionedConcurrentExecutions \\",
+            "     --min-capacity 5 \\",
+            "     --max-capacity 50",
+            "",
+            "   aws application-autoscaling put-scaling-policy \\",
+            "     --policy-name lambda-scaling-policy \\",
+            "     --service-namespace lambda \\",
+            "     --resource-id function:api-function:prod \\",
+            "     --scalable-dimension lambda:function:ProvisionedConcurrentExecutions \\",
+            "     --policy-type TargetTrackingScaling \\",
+            "     --target-tracking-scaling-policy-configuration '{",
+            '       "TargetValue": 0.70,',
+            '       "PredefinedMetricSpecification": {',
+            '         "PredefinedMetricType": "LambdaProvisionedConcurrencyUtilization"',
+            "       }",
+            "     }'",
+            "",
+            "8. Créer alarme sur throttling:",
+            "   aws cloudwatch put-metric-alarm \\",
+            "     --alarm-name lambda-throttling \\",
+            "     --alarm-description 'Lambda function throttled' \\",
+            "     --metric-name Throttles \\",
+            "     --namespace AWS/Lambda \\",
+            "     --statistic Sum \\",
+            "     --period 60 \\",
+            "     --evaluation-periods 1 \\",
+            "     --threshold 1 \\",
+            "     --comparison-operator GreaterThanThreshold \\",
+            "     --dimensions Name=FunctionName,Value=myfunction"
+        ],
+        verification_steps=[
+            "Vérifier account concurrency limit:",
+            "  aws lambda get-account-settings --query 'AccountLimit.ConcurrentExecutions'",
+            "",
+            "Lister functions avec reserved concurrency:",
+            "  aws lambda list-functions \\",
+            "    --query 'Functions[?ReservedConcurrentExecutions!=`null`].[FunctionName,ReservedConcurrentExecutions]' \\",
+            "    --output table",
+            "",
+            "Calculer unreserved pool disponible:",
+            "  TOTAL=$(aws lambda get-account-settings --query 'AccountLimit.ConcurrentExecutions' --output text)",
+            "  RESERVED=$(aws lambda list-functions --query 'sum(Functions[].ReservedConcurrentExecutions)')",
+            "  echo \"Unreserved pool: $((TOTAL - RESERVED))\"",
+            "",
+            "Vérifier provisioned concurrency:",
+            "  aws lambda get-provisioned-concurrency-config \\",
+            "    --function-name api-function \\",
+            "    --qualifier prod",
+            "",
+            "Monitorer concurrent executions temps réel:",
+            "  aws cloudwatch get-metric-statistics \\",
+            "    --namespace AWS/Lambda \\",
+            "    --metric-name ConcurrentExecutions \\",
+            "    --dimensions Name=FunctionName,Value=myfunction \\",
+            "    --start-time $(date -u -d '1 hour ago' +%Y-%m-%dT%H:%M:%S) \\",
+            "    --end-time $(date -u +%Y-%m-%dT%H:%M:%S) \\",
+            "    --period 60 \\",
+            "    --statistics Maximum",
+            "",
+            "Vérifier throttling events:",
+            "  aws cloudwatch get-metric-statistics \\",
+            "    --namespace AWS/Lambda \\",
+            "    --metric-name Throttles \\",
+            "    --dimensions Name=FunctionName,Value=myfunction \\",
+            "    --start-time $(date -u -d '24 hours ago' +%Y-%m-%dT%H:%M:%S) \\",
+            "    --end-time $(date -u +%Y-%m-%dT%H:%M:%S) \\",
+            "    --period 3600 \\",
+            "    --statistics Sum",
+            "",
+            "Identifier functions sans concurrency limits (cost risk):",
+            "  aws lambda list-functions \\",
+            "    --query 'Functions[?ReservedConcurrentExecutions==`null`].[FunctionName]' \\",
+            "    --output table",
+            "",
+            "Coût estimé provisioned concurrency:",
+            "  # $0.015 per GB-hour",
+            "  # Exemple: 50 provisioned x 1GB x 730h/month = 50 x 730 x 0.015 = $547.50/month"
+        ],
+        references=[
+            "https://docs.aws.amazon.com/lambda/latest/dg/configuration-concurrency.html",
+            "https://docs.aws.amazon.com/lambda/latest/dg/provisioned-concurrency.html",
+            "https://aws.amazon.com/blogs/compute/managing-aws-lambda-function-concurrency/"
+        ]
+    ),
+
+    Question(
+        id="LAMBDA-005",
+        question="Dead Letter Queue (DLQ) configurée pour asynchronous invocations et X-Ray tracing activé pour debugging?",
+        description="Vérifier DLQ SQS/SNS pour failed async invocations et X-Ray pour distributed tracing et performance analysis",
+        severity="MEDIUM",
+        category="Lambda",
+        compliance=["AWS Well-Architected", "Observability"],
+        technical_details="""
+        Lambda Error Handling & Observability:
+
+        Dead Letter Queue (DLQ):
+        - Capture failed async Lambda invocations
+        - Après 2 retries automatiques (total 3 tentatives)
+        - DLQ peut être SQS queue ou SNS topic
+        - Messages contiennent payload + error details
+        - Permet investigation et reprocessing
+
+        Async invocation sources:
+        - S3 events
+        - SNS notifications
+        - EventBridge rules
+        - SES email actions
+        - CloudWatch Logs subscription filters
+
+        DLQ vs Destinations:
+        - DLQ: legacy, envoie vers SQS/SNS uniquement
+        - Destinations: modern, plus options (S3, EventBridge, Lambda, SQS, SNS)
+        - Destinations: separate success vs failure
+        - Recommandation: Destinations over DLQ
+
+        Event source mapping failures:
+        - Kinesis, DynamoDB Streams, SQS: different error handling
+        - Pas de DLQ, utiliser event source mapping config
+        - On-Failure Destination pour Kinesis/DynamoDB
+
+        X-Ray Tracing:
+        - Distributed tracing pour Lambda + downstream services
+        - Visualize service map et latency
+        - Identify bottlenecks et errors
+        - Active ou PassThrough mode
+
+        X-Ray data collecté:
+        - Latency distribution
+        - HTTP requests traces
+        - SQL queries (avec instrumentation)
+        - AWS SDK calls (DynamoDB, S3, etc.)
+        - Subsegments pour custom logic
+
+        X-Ray coût:
+        - $5 per million traces recorded
+        - $0.50 per million traces retrieved/scanned
+        - Free tier: 100k traces/month
+
+        Sampling:
+        - Réduit coût avec sampling rules
+        - Default: 1 request/second + 5% de reste
+        - Custom rules par route, service, etc.
+
+        CloudWatch Logs vs X-Ray:
+        - Logs: text-based, debugging details
+        - X-Ray: visual traces, performance analysis
+        - Complémentaires, utiliser les deux
+        """,
+        remediation=[
+            "1. Créer SQS queue pour DLQ:",
+            "   aws sqs create-queue --queue-name lambda-dlq",
+            "",
+            "2. Configurer DLQ sur Lambda function:",
+            "   aws lambda update-function-configuration \\",
+            "     --function-name myfunction \\",
+            "     --dead-letter-config TargetArn=arn:aws:sqs:region:account:lambda-dlq",
+            "",
+            "3. Ajouter IAM permissions pour DLQ:",
+            "   {",
+            '     "Effect": "Allow",',
+            '     "Action": ["sqs:SendMessage"],',
+            '     "Resource": "arn:aws:sqs:region:account:lambda-dlq"',
+            "   }",
+            "",
+            "4. Alternative: configurer Destinations (modern):",
+            "   aws lambda put-function-event-invoke-config \\",
+            "     --function-name myfunction \\",
+            "     --destination-config '{",
+            '       "OnFailure": {',
+            '         "Destination": "arn:aws:sqs:region:account:failure-queue"',
+            "       },",
+            '       "OnSuccess": {',
+            '         "Destination": "arn:aws:sqs:region:account:success-queue"',
+            "       }",
+            "     }' \\",
+            "     --maximum-retry-attempts 2",
+            "",
+            "5. Activer X-Ray tracing:",
+            "   aws lambda update-function-configuration \\",
+            "     --function-name myfunction \\",
+            "     --tracing-config Mode=Active",
+            "",
+            "6. Ajouter IAM permissions pour X-Ray:",
+            "   aws iam attach-role-policy \\",
+            "     --role-name lambda-role \\",
+            "     --policy-arn arn:aws:iam::aws:policy/AWSXRayDaemonWriteAccess",
+            "",
+            "7. Instrumenter code Python avec X-Ray SDK:",
+            "   from aws_xray_sdk.core import xray_recorder",
+            "   from aws_xray_sdk.core import patch_all",
+            "",
+            "   patch_all()  # Auto-instrument AWS SDK, requests, etc.",
+            "",
+            "   @xray_recorder.capture('my_function')",
+            "   def lambda_handler(event, context):",
+            "       # Code here automatically traced",
+            "       pass",
+            "",
+            "8. Custom subsegments pour instrumentation détaillée:",
+            "   from aws_xray_sdk.core import xray_recorder",
+            "",
+            "   subsegment = xray_recorder.begin_subsegment('database_query')",
+            "   try:",
+            "       # Database query code",
+            "       subsegment.put_annotation('query_type', 'SELECT')",
+            "       subsegment.put_metadata('query', sql_query)",
+            "   finally:",
+            "       xray_recorder.end_subsegment()",
+            "",
+            "9. Configurer X-Ray sampling rules:",
+            "   aws xray create-sampling-rule --cli-input-json file://sampling-rule.json",
+            "",
+            "   # sampling-rule.json:",
+            "   {",
+            '     "SamplingRule": {',
+            '       "RuleName": "prod-apis",',
+            '       "Priority": 100,',
+            '       "FixedRate": 0.05,',
+            '       "ReservoirSize": 1,',
+            '       "ServiceName": "api-function",',
+            '       "ServiceType": "AWS::Lambda::Function",',
+            '       "Host": "*",',
+            '       "HTTPMethod": "*",',
+            '       "URLPath": "*",',
+            '       "Version": 1',
+            "     }",
+            "   }"
+        ],
+        verification_steps=[
+            "Lister functions avec DLQ configurée:",
+            "  aws lambda list-functions \\",
+            "    --query 'Functions[?DeadLetterConfig!=`null`].[FunctionName,DeadLetterConfig.TargetArn]' \\",
+            "    --output table",
+            "",
+            "Identifier functions async SANS DLQ (risque):",
+            "  # Functions invoked by S3, SNS, EventBridge sans DLQ",
+            "  aws lambda list-functions \\",
+            "    --query 'Functions[?DeadLetterConfig==`null`].[FunctionName]' \\",
+            "    --output table",
+            "",
+            "Vérifier Destinations config:",
+            "  aws lambda get-function-event-invoke-config --function-name myfunction",
+            "",
+            "Vérifier messages dans DLQ:",
+            "  DLQ_URL=$(aws sqs get-queue-url --queue-name lambda-dlq --query 'QueueUrl' --output text)",
+            "  aws sqs receive-message --queue-url $DLQ_URL --max-number-of-messages 10",
+            "",
+            "Vérifier X-Ray tracing status:",
+            "  aws lambda get-function-configuration --function-name myfunction \\",
+            "    --query 'TracingConfig.Mode'",
+            "",
+            "Lister functions SANS X-Ray:",
+            "  aws lambda list-functions \\",
+            "    --query 'Functions[?TracingConfig.Mode!=`Active`].[FunctionName,TracingConfig.Mode]' \\",
+            "    --output table",
+            "",
+            "Consulter X-Ray service map:",
+            "  # Via console: X-Ray > Service map",
+            "  # ou API:",
+            "  aws xray get-service-graph \\",
+            "    --start-time $(date -u -d '1 hour ago' +%s) \\",
+            "    --end-time $(date -u +%s)",
+            "",
+            "Rechercher traces avec errors:",
+            "  aws xray get-trace-summaries \\",
+            "    --start-time $(date -u -d '1 hour ago' +%s) \\",
+            "    --end-time $(date -u +%s) \\",
+            "    --filter-expression 'error = true'",
+            "",
+            "Obtenir trace détaillée:",
+            "  aws xray batch-get-traces --trace-ids <trace-id>",
+            "",
+            "CloudWatch Insights query pour errors:",
+            "  aws logs start-query \\",
+            "    --log-group-name /aws/lambda/myfunction \\",
+            "    --start-time $(date -d '1 hour ago' +%s) \\",
+            "    --end-time $(date +%s) \\",
+            "    --query-string 'fields @timestamp, @message | filter @message like /ERROR/'",
+            "",
+            "Vérifier sampling rules:",
+            "  aws xray get-sampling-rules"
+        ],
+        references=[
+            "https://docs.aws.amazon.com/lambda/latest/dg/invocation-async.html",
+            "https://docs.aws.amazon.com/lambda/latest/dg/gettingstarted-concepts.html#gettingstarted-concepts-dlq",
+            "https://docs.aws.amazon.com/lambda/latest/dg/lambda-x-ray.html",
+            "https://docs.aws.amazon.com/xray/latest/devguide/xray-sdk-python.html"
+        ]
+    )
+]
+
+# ==================== API GATEWAY ====================
+APIGATEWAY_QUESTIONS = [
+    Question(
+        id="APIGW-001",
+        question="API Gateway: authorizers configurés, WAF attaché, throttling et caching activés?",
+        description="Sécurité API Gateway",
+        severity="CRITICAL",
+        category="API Gateway",
+        compliance=["OWASP API Security"],
+        technical_details="Cognito/Lambda authorizers, WAF, throttling, caching",
+        remediation=["Configurer authorizer", "Attacher WAF", "Activer throttling"],
+        verification_steps=["aws apigateway get-rest-apis"],
+        references=["https://docs.aws.amazon.com/apigateway/"]
+    )
+]
+
+# ==================== CLOUDTRAIL & LOGGING ====================
+CLOUDTRAIL_QUESTIONS = [
+    Question(
+        id="TRAIL-001",
+        question="CloudTrail multi-région activé, logs chiffrés KMS, validation integrity?",
+        description="Audit trail complet",
+        severity="CRITICAL",
+        category="CloudTrail",
+        compliance=["PCI-DSS", "HIPAA", "SOC2"],
+        technical_details="Multi-region trail, log validation, KMS encryption",
+        remediation=["Créer trail multi-région", "Activer log file validation", "Chiffrer avec KMS"],
+        verification_steps=["aws cloudtrail describe-trails"],
+        references=["https://docs.aws.amazon.com/awscloudtrail/"]
+    )
+]
+
+# Export ALL_QUESTIONS
+ALL_QUESTIONS = (IAM_QUESTIONS + VPC_QUESTIONS + EC2_QUESTIONS + S3_QUESTIONS + 
+                 RDS_QUESTIONS + LAMBDA_QUESTIONS + APIGATEWAY_QUESTIONS + CLOUDTRAIL_QUESTIONS)
+
+# Export des listes pour l'app
+__all__ = ['ALL_QUESTIONS', 'IAM_QUESTIONS', 'VPC_QUESTIONS', 'EC2_QUESTIONS', 'S3_QUESTIONS',
+           'RDS_QUESTIONS', 'LAMBDA_QUESTIONS', 'APIGATEWAY_QUESTIONS', 'CLOUDTRAIL_QUESTIONS', 'Question']
