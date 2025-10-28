@@ -3549,10 +3549,256 @@ CLOUDTRAIL_QUESTIONS = [
     )
 ]
 
+
+
+# ==================== CLOUDFORMATION ====================
+CLOUDFORMATION_QUESTIONS = [
+    Question(
+        id="CFN-001",
+        question="Drift detection activé et stack policies configurées pour protéger ressources critiques?",
+        description="Vérifier drift detection régulier et stack policies empêchant modification/suppression ressources",
+        severity="HIGH",
+        category="CloudFormation",
+        compliance=["AWS Well-Architected", "Change Management"],
+        technical_details="Drift detection identifie changements manuels. Stack policies protègent contre updates accidentels",
+        remediation=["aws cloudformation detect-stack-drift", "Créer stack policy JSON", "aws cloudformation set-stack-policy"],
+        verification_steps=["aws cloudformation describe-stack-drift-detection-status", "aws cloudformation get-stack-policy"],
+        references=["https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/using-cfn-stack-drift.html"]
+    ),
+    
+    Question(
+        id="CFN-002",
+        question="Secrets et credentials gérés via Secrets Manager/Parameter Store, pas de hardcoded values?",
+        description="Vérifier que templates CloudFormation utilisent dynamic references, pas de secrets en clair",
+        severity="CRITICAL",
+        category="CloudFormation",
+        compliance=["Security Best Practices", "PCI-DSS"],
+        technical_details="Utiliser {{resolve:secretsmanager:secret-id}} et {{resolve:ssm-secure:parameter}} dans templates",
+        remediation=["Migrer secrets vers Secrets Manager", "Utiliser dynamic references CFN", "Scan templates pour secrets hardcodés"],
+        verification_steps=["git-secrets ou trufflehog sur repo", "aws cloudformation get-template", "Vérifier NoEcho sur parameters sensibles"],
+        references=["https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/dynamic-references.html"]
+    ),
+    
+    Question(
+        id="CFN-003",
+        question="ChangeSets utilisés avant tout déploiement pour review et StackSets pour déploiements multi-comptes?",
+        description="Vérifier utilisation change sets (preview changes) et StackSets pour governance multi-account",
+        severity="MEDIUM",
+        category="CloudFormation",
+        compliance=["Change Management", "Multi-Account Strategy"],
+        technical_details="Change Sets = dry-run montrant impact changes. StackSets = déploiement centralisé multi-comptes/régions",
+        remediation=["aws cloudformation create-change-set", "Review avant execute-change-set", "create-stack-set pour multi-account"],
+        verification_steps=["Vérifier CI/CD utilise change-set", "aws cloudformation list-stack-sets", "describe-stack-set-operation"],
+        references=["https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/using-cfn-updating-stacks-changesets.html"]
+    )
+]
+
+# ==================== CLOUDWATCH ====================
+CLOUDWATCH_QUESTIONS = [
+    Question(
+        id="CW-001",
+        question="Alarmes CloudWatch critiques configurées (CPU, StatusCheckFailed, disk, RDS) avec SNS notifications?",
+        description="Vérifier alarmes pour métriques critiques avec actions SNS/Auto Scaling",
+        severity="HIGH",
+        category="CloudWatch",
+        compliance=["AWS Well-Architected", "Operational Excellence"],
+        technical_details="Alarmes sur EC2 CPU > 80%, StatusCheckFailed, RDS CPU/FreeableMemory, Lambda errors, etc.",
+        remediation=["aws cloudwatch put-metric-alarm", "Créer SNS topic", "subscribe email/SMS", "Alarmes composite pour AND/OR logic"],
+        verification_steps=["aws cloudwatch describe-alarms", "Tester avec set-alarm-state", "Vérifier actions configurées"],
+        references=["https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/AlarmThatSendsEmail.html"]
+    ),
+    
+    Question(
+        id="CW-002",
+        question="Log retention configurée (30-90+ jours) et log aggregation pour toutes applications critiques?",
+        description="Vérifier CloudWatch Logs retention policies et centralization multi-account",
+        severity="MEDIUM",
+        category="CloudWatch",
+        compliance=["Compliance Retention", "Forensics"],
+        technical_details="Retention par défaut = indefinite (coûteux). Set 30/90/365 jours selon compliance. Cross-account logging.",
+        remediation=["aws logs put-retention-policy", "Subscription filters vers central account", "Kinesis Data Firehose vers S3 long-term"],
+        verification_steps=["aws logs describe-log-groups --query 'logGroups[?!retentionInDays]'", "Identifier groupes sans retention"],
+        references=["https://docs.aws.amazon.com/AmazonCloudWatch/latest/logs/Working-with-log-groups-and-streams.html"]
+    ),
+    
+    Question(
+        id="CW-003",
+        question="Metric filters configurés pour events sécurité (unauthorized API calls, IAM changes, root usage)?",
+        description="Vérifier metric filters CloudWatch Logs pour détecter activité suspecte et violations",
+        severity="HIGH",
+        category="CloudWatch",
+        compliance=["CIS Benchmark", "Security Monitoring"],
+        technical_details="Metric filters transforment log patterns en métriques CloudWatch. Alarmes sur métriques pour alerting.",
+        remediation=["Créer filters: UnauthorizedAPICalls, RootAccountUsage, IAMPolicyChanges", "aws logs put-metric-filter", "Alarmes sur metrics"],
+        verification_steps=["aws logs describe-metric-filters", "CIS Benchmark section 3 (Monitoring)", "Test avec unauthorized API call"],
+        references=["https://docs.aws.amazon.com/securityhub/latest/userguide/securityhub-cis-controls.html"]
+    )
+]
+
+# ==================== CLOUDFRONT ====================
+CLOUDFRONT_QUESTIONS = [
+    Question(
+        id="CF-001",
+        question="CloudFront avec HTTPS obligatoire, TLS 1.2+ enforced, et WAF attaché?",
+        description="Vérifier CloudFront distributions utilisent HTTPS only, TLS moderne, et AWS WAF",
+        severity="CRITICAL",
+        category="CloudFront",
+        compliance=["PCI-DSS", "OWASP"],
+        technical_details="Viewer Protocol Policy=redirect-to-https. Origin Protocol Policy=https-only. Security policy TLSv1.2_2021",
+        remediation=["update-distribution viewer-protocol-policy", "Attacher Web ACL WAF", "Security policy minimum TLS 1.2"],
+        verification_steps=["aws cloudfront get-distribution", "Vérifier ViewerProtocolPolicy, WebACLId, MinimumProtocolVersion"],
+        references=["https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/secure-connections-supported-viewer-protocols-ciphers.html"]
+    ),
+    
+    Question(
+        id="CF-002",
+        question="CloudFront logging activé vers S3 et Origin Access Identity (OAI) pour S3 origins?",
+        description="Vérifier access logs CloudFront et OAI pour sécuriser accès S3 (pas de public access)",
+        severity="HIGH",
+        category="CloudFront",
+        compliance=["Audit Trail", "Security"],
+        technical_details="Logging capture toutes requests. OAI = identité CloudFront, bucket policy autorise seulement OAI",
+        remediation=["update-distribution --logging-config", "create-cloud-front-origin-access-identity", "Update S3 bucket policy"],
+        verification_steps=["get-distribution --query 'Distribution.DistributionConfig.Logging'", "Vérifier OAI dans Origins"],
+        references=["https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/private-content-restricting-access-to-s3.html"]
+    ),
+    
+    Question(
+        id="CF-003",
+        question="Geo-restriction et signed URLs/cookies pour contenu privé si applicable?",
+        description="Vérifier geo-blocking et signed URLs pour restreindre accès contenu sensible",
+        severity="MEDIUM",
+        category="CloudFront",
+        compliance=["Access Control"],
+        technical_details="Geo-restriction whitelist/blacklist pays. Signed URLs/cookies avec expiration pour contenu privé",
+        remediation=["update-distribution --restrictions", "Générer signed URLs avec CloudFront key pair", "Lambda@Edge pour auth custom"],
+        verification_steps=["get-distribution --query 'Distribution.DistributionConfig.Restrictions'", "Test signed URL generation"],
+        references=["https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/PrivateContent.html"]
+    )
+]
+
+# ==================== KMS ====================
+KMS_QUESTIONS = [
+    Question(
+        id="KMS-001",
+        question="KMS customer-managed keys avec rotation automatique activée et key policies least privilege?",
+        description="Vérifier CMKs avec auto-rotation annuelle et policies restrictives (pas de wildcard principals)",
+        severity="HIGH",
+        category="KMS",
+        compliance=["PCI-DSS", "HIPAA", "Cryptographic Standards"],
+        technical_details="Auto-rotation yearly. Key policies contrôlent qui peut utiliser/gérer keys. Séparer encrypt vs decrypt permissions",
+        remediation=["enable-key-rotation", "Créer key policy avec principals spécifiques", "Separate keys par environment/data classification"],
+        verification_steps=["aws kms get-key-rotation-status", "get-key-policy", "Identifier keys sans rotation ou policies trop permissives"],
+        references=["https://docs.aws.amazon.com/kms/latest/developerguide/rotate-keys.html"]
+    ),
+    
+    Question(
+        id="KMS-002",
+        question="CloudTrail logging actif pour toutes opérations KMS et alarmes sur usage anormal?",
+        description="Vérifier CloudTrail capture KMS API calls et alarmes sur disable-key, delete-key, policy changes",
+        severity="CRITICAL",
+        category="KMS",
+        compliance=["Audit", "Security Monitoring"],
+        technical_details="CloudTrail logs Decrypt, Encrypt, GenerateDataKey calls. Metric filters pour suspicious activity",
+        remediation=["CloudTrail enabled", "Metric filters: DisableKey, ScheduleKeyDeletion, PutKeyPolicy", "Alarmes CloudWatch"],
+        verification_steps=["CloudTrail lookup-events EventName=DisableKey", "aws cloudwatch describe-alarms | grep KMS"],
+        references=["https://docs.aws.amazon.com/kms/latest/developerguide/logging-using-cloudtrail.html"]
+    ),
+    
+    Question(
+        id="KMS-003",
+        question="Key deletion protection et délai minimum 30 jours avant suppression effective?",
+        description="Vérifier ScheduleKeyDeletion avec PendingWindowInDays >= 30 et monitoring sur scheduled deletions",
+        severity="HIGH",
+        category="KMS",
+        compliance=["Data Protection", "Disaster Recovery"],
+        technical_details="KMS keys jamais supprimées immédiatement. Waiting period 7-30 jours. Permet cancel si erreur",
+        remediation=["schedule-key-deletion --pending-window-in-days 30", "Alarme sur ScheduleKeyDeletion events", "Cancel avec cancel-key-deletion"],
+        verification_steps=["describe-key --query 'KeyMetadata.KeyState'", "Identifier keys dans PendingDeletion state"],
+        references=["https://docs.aws.amazon.com/kms/latest/developerguide/deleting-keys.html"]
+    )
+]
+
+# ==================== ECS/EKS ====================
+CONTAINER_QUESTIONS = [
+    Question(
+        id="CONTAINER-001",
+        question="Container images scannées pour vulnérabilités (ECR scan ou Trivy) et provenant de registries approuvés?",
+        description="Vérifier scanning automatique images ECR et policies empêchant images non-scannées/vulnérables",
+        severity="CRITICAL",
+        category="Containers",
+        compliance=["Security Scanning", "Supply Chain"],
+        technical_details="ECR scan on push avec findings CRITICAL/HIGH. Image policies bloquer deploy si vulnérabilités. Trusted registries only",
+        remediation=["put-image-scanning-configuration scanOnPush=true", "Review scan findings", "OPA/Admission controller pour K8s"],
+        verification_steps=["describe-image-scan-findings", "Lister images avec CRITICAL findings", "Vérifier scan récent < 7 jours"],
+        references=["https://docs.aws.amazon.com/AmazonECR/latest/userguide/image-scanning.html"]
+    ),
+    
+    Question(
+        id="CONTAINER-002",
+        question="ECS tasks/EKS pods avec IAM roles (pas de credentials hardcodés), secrets via Secrets Manager?",
+        description="Vérifier task definitions utilisent taskRoleArn et secrets injectés depuis Secrets Manager/Parameter Store",
+        severity="CRITICAL",
+        category="Containers",
+        compliance=["Least Privilege", "Secrets Management"],
+        technical_details="Task IAM role pour permissions AWS. Execution role pour pull image ECR. Secrets injection via environment valueFrom",
+        remediation=["register-task-definition avec taskRoleArn", "Secrets dans secrets section valueFrom", "EKS: ExternalSecrets Operator"],
+        verification_steps=["describe-task-definition", "Chercher hardcoded AWS credentials", "Vérifier taskRoleArn présent"],
+        references=["https://docs.aws.amazon.com/AmazonECS/latest/developerguide/specifying-sensitive-data-secrets.html"]
+    ),
+    
+    Question(
+        id="CONTAINER-003",
+        question="EKS: RBAC configuré restrictif, PSP/PSA pour pod security, network policies actives?",
+        description="Vérifier Kubernetes RBAC least privilege, Pod Security Standards, et Network Policies segmentation",
+        severity="HIGH",
+        category="Containers",
+        compliance=["K8s Security", "Zero Trust"],
+        technical_details="RBAC roles/rolebindings par namespace. PSA restricted mode. Network Policies deny-all par défaut puis allow specific",
+        remediation=["kubectl create role/rolebinding", "Pod Security admission: restricted", "kubectl apply network-policy"],
+        verification_steps=["kubectl get rolebindings --all-namespaces", "kubectl get psp ou admission config", "kubectl get networkpolicies"],
+        references=["https://kubernetes.io/docs/concepts/security/rbac-good-practices/"]
+    )
+]
+
+# ==================== ROUTE53 ====================
+ROUTE53_QUESTIONS = [
+    Question(
+        id="R53-001",
+        question="DNSSEC activé sur hosted zones publiques et Route53 Resolver DNS Firewall configuré?",
+        description="Vérifier DNSSEC signing pour authenticity et DNS Firewall pour bloquer domaines malicieux",
+        severity="HIGH",
+        category="Route53",
+        compliance=["DNS Security", "Threat Protection"],
+        technical_details="DNSSEC cryptographic signing empêche DNS spoofing. DNS Firewall filtre queries vers domaines malveillants",
+        remediation=["enable-hosted-zone-dnssec", "create-firewall-rule-group avec managed domain lists", "associate-firewall-rule-group to VPC"],
+        verification_steps=["aws route53 get-dnssec --hosted-zone-id", "list-firewall-rule-groups", "Test dig +dnssec domain"],
+        references=["https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/dns-configuring-dnssec.html"]
+    ),
+    
+    Question(
+        id="R53-002",
+        question="Query logging activé vers CloudWatch pour audit et health checks configurés avec alarmes?",
+        description="Vérifier Route53 query logging et health checks avec SNS notifications sur failures",
+        severity="MEDIUM",
+        category="Route53",
+        compliance=["Audit Trail", "Availability Monitoring"],
+        technical_details="Query logging capture toutes DNS queries. Health checks monitoring endpoints avec failover automatique",
+        remediation=["create-query-logging-config", "create-health-check avec AlarmConfiguration", "SNS topic pour notifications"],
+        verification_steps=["list-query-logging-configs", "list-health-checks", "CloudWatch Logs groupe /aws/route53/"],
+        references=["https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/query-logs.html"]
+    )
+]
+
+
 # Export ALL_QUESTIONS
 ALL_QUESTIONS = (IAM_QUESTIONS + VPC_QUESTIONS + EC2_QUESTIONS + S3_QUESTIONS + 
-                 RDS_QUESTIONS + LAMBDA_QUESTIONS + APIGATEWAY_QUESTIONS + CLOUDTRAIL_QUESTIONS)
+                 RDS_QUESTIONS + LAMBDA_QUESTIONS + APIGATEWAY_QUESTIONS + CLOUDTRAIL_QUESTIONS +
+                 CLOUDFORMATION_QUESTIONS + CLOUDWATCH_QUESTIONS + CLOUDFRONT_QUESTIONS + 
+                 KMS_QUESTIONS + CONTAINER_QUESTIONS + ROUTE53_QUESTIONS)
 
 # Export des listes pour l'app
 __all__ = ['ALL_QUESTIONS', 'IAM_QUESTIONS', 'VPC_QUESTIONS', 'EC2_QUESTIONS', 'S3_QUESTIONS',
-           'RDS_QUESTIONS', 'LAMBDA_QUESTIONS', 'APIGATEWAY_QUESTIONS', 'CLOUDTRAIL_QUESTIONS', 'Question']
+           'RDS_QUESTIONS', 'LAMBDA_QUESTIONS', 'APIGATEWAY_QUESTIONS', 'CLOUDTRAIL_QUESTIONS',
+           'CLOUDFORMATION_QUESTIONS', 'CLOUDWATCH_QUESTIONS', 'CLOUDFRONT_QUESTIONS',
+           'KMS_QUESTIONS', 'CONTAINER_QUESTIONS', 'ROUTE53_QUESTIONS', 'Question']
