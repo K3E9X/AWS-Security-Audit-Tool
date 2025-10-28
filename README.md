@@ -1,516 +1,402 @@
-# AWS Security Audit API
+# AWS Security Audit Tool
 
-API REST complète pour obtenir des questions d'audit de sécurité lors de l'évaluation d'infrastructures SaaS hébergées sur AWS.
+**Professional interactive web application for comprehensive AWS security audits**
 
-## Description
+A modern, professional security audit tool designed for security consultants and auditors conducting client workshops and AWS infrastructure assessments.
 
-Cet outil fournit une base de données exhaustive de questions d'audit de sécurité AWS, organisées par catégories et niveaux de sévérité. Il aide les auditeurs de sécurité, consultants, et équipes DevSecOps à évaluer la posture de sécurité d'applications SaaS déployées sur AWS.
+## Overview
 
-### Caractéristiques principales
+This tool provides an interactive web interface for conducting thorough AWS security audits with:
 
-- **70+ questions d'audit** couvrant tous les aspects de sécurité AWS
-- **10 catégories** : IAM, Network, Encryption, Logging, Compliance, Storage, Database, Application, Incident Response, Cost Optimization
-- **5 niveaux de sévérité** : Critical, High, Medium, Low, Info
-- **Conformité** : ISO 27001, SOC2, PCI-DSS, HIPAA, GDPR, CIS AWS Foundations, OWASP
-- **API REST complète** avec documentation interactive (Swagger/OpenAPI)
-- **Filtres multiples** : par catégorie, sévérité, service AWS, framework de conformité
-- **Détails complets** : description, étapes de remédiation, références AWS
+- **150+ advanced technical questions** covering critical AWS services
+- **Interactive checklist** with real-time progress tracking
+- **Architecture diagram editor** to visualize client infrastructure
+- **Session management** to save and resume audits
+- **Professional report generation** (Markdown & PDF)
+- **Compliance mapping** (ISO 27001, SOC2, PCI-DSS, HIPAA, GDPR, CIS Benchmark)
+
+## Features
+
+### Interactive Web Interface
+
+- Modern, professional design suitable for client workshops
+- Real-time progress tracking and statistics
+- Filter questions by severity, compliance framework, and service
+- Mark questions as Compliant, Non-Compliant, N/A, or To Review
+- Add detailed notes and findings for each question
+
+### AWS Services Covered
+
+#### Identity & Access Management
+- IAM policies, roles, and users
+- MFA enforcement and password policies
+- Access key rotation and management
+- Service Control Policies (SCPs)
+- Cross-account access and trust policies
+
+#### Network Security
+- VPC architecture and isolation
+- Security Groups and Network ACLs
+- VPC Flow Logs analysis
+- VPC Endpoints and PrivateLink
+- Network Firewall and inspection
+
+#### Compute & Containers
+- EC2 instance security configurations
+- Lambda function security
+- ECS/EKS container security
+- Systems Manager and patch management
+
+#### Storage & Databases
+- S3 bucket security and encryption
+- RDS security configurations
+- Database encryption at rest and in transit
+- Backup and recovery procedures
+
+#### Application Services
+- API Gateway security
+- CloudFront distributions
+- Load balancer configurations
+- WAF rules and protection
+
+### Architecture Diagram Editor
+
+- Visual diagram builder for documenting client infrastructure
+- Pre-defined AWS component templates
+- Connection mapping between services
+- Save and load diagram states
+- Export diagrams with audit reports
+
+### Audit Session Management
+
+- Save audit progress at any time
+- Resume previous audit sessions
+- Multiple concurrent audits support
+- Automatic progress calculation
+
+### Report Generation
+
+Generate professional audit reports including:
+- Executive summary with statistics
+- Critical and high-risk findings
+- Detailed findings by service
+- Risk distribution analysis
+- Remediation recommendations
+- Compliance framework mapping
+
+Export formats:
+- **Markdown** - For documentation systems
+- **PDF** - For formal client deliverables
 
 ## Installation
 
-### Prérequis
+### Prerequisites
 
-- Python 3.8+
-- pip
+- Python 3.8 or higher
+- pip package manager
 
-### Installation des dépendances
+### Setup
 
 ```bash
-# Cloner le repository
-git clone <repository-url>
+# Clone the repository
+git clone https://github.com/K3E9X/Machine71.git
 cd Machine71
 
-# Créer un environnement virtuel (recommandé)
-python -m venv venv
-source venv/bin/activate  # Sur Windows: venv\Scripts\activate
+# Create virtual environment
+python3 -m venv venv
 
-# Installer les dépendances
+# Activate virtual environment
+# On macOS/Linux:
+source venv/bin/activate
+# On Windows:
+venv\Scripts\activate
+
+# Install dependencies
 pip install -r requirements.txt
 ```
 
-## Démarrage rapide
+## Usage
 
-### Lancer l'API
-
-```bash
-python main.py
-```
-
-L'API sera accessible sur `http://localhost:8000`
-
-### Documentation interactive
-
-Une fois l'API lancée, accédez à la documentation interactive Swagger UI :
-
-```
-http://localhost:8000/docs
-```
-
-Ou la documentation ReDoc :
-
-```
-http://localhost:8000/redoc
-```
-
-## Utilisation
-
-### Endpoints disponibles
-
-#### 1. Informations générales
+### Launch the Application
 
 ```bash
-# Point d'entrée de l'API
-GET /
-
-# Health check
-GET /health
+streamlit run app.py
 ```
 
-#### 2. Catégories
+The application will open automatically in your default browser at `http://localhost:8501`
+
+### Conducting an Audit
+
+1. **Start from Dashboard**
+   - View overall statistics and progress
+   - Understand the scope of the audit
+
+2. **Select Service Category**
+   - Use sidebar navigation to select AWS service
+   - Available: IAM, VPC, EC2, S3, RDS, Lambda, API Gateway
+
+3. **Answer Questions**
+   - Read technical details and verification steps
+   - Mark status: Compliant / Non-Compliant / N/A / To Review
+   - Assign risk level: Critical / High / Medium / Low
+   - Add detailed notes and findings
+   - Save each answer
+
+4. **Document Architecture**
+   - Navigate to Architecture Diagram
+   - Add AWS components (VPC, EC2, RDS, S3, etc.)
+   - Create connections between components
+   - Save diagram for report inclusion
+
+5. **Generate Report**
+   - Navigate to Export Report
+   - Enter client name and auditor details
+   - Select report options
+   - Export as Markdown or PDF
+
+### Session Management
 
 ```bash
-# Lister toutes les catégories
-GET /categories
+# Save current audit session
+Click "Save Session" in sidebar
+
+# Load previous session
+Click "Load Session" in sidebar
+
+# Sessions are stored in: sessions/audit_session_YYYYMMDD_HHMMSS.json
 ```
 
-**Exemple de réponse :**
-```json
-{
-  "categories": [
-    {
-      "category": "iam",
-      "name": "IAM - Identity and Access Management",
-      "description": "Gestion des identités, permissions, et contrôles d'accès",
-      "question_count": 7
-    },
-    ...
-  ]
-}
+## Project Structure
+
+```
+Machine71/
+├── app.py                          # Main Streamlit application
+├── requirements.txt                # Python dependencies
+├── data/
+│   ├── __init__.py
+│   ├── aws_services_questions.py   # Comprehensive question database
+│   └── diagrams/                   # Saved architecture diagrams
+├── utils/
+│   ├── __init__.py
+│   ├── session.py                  # Audit session management
+│   ├── export.py                   # Report generation (MD/PDF)
+│   └── diagram.py                  # Architecture diagram editor
+├── sessions/                       # Saved audit sessions
+├── reports/                        # Generated reports
+└── README.md                       # This file
 ```
 
-#### 3. Questions d'audit
+## Question Categories
 
-```bash
-# Récupérer toutes les questions
-GET /questions
+### IAM Security (7+ questions)
+- Password policies and complexity
+- MFA enforcement strategies
+- Least privilege principle implementation
+- Access key rotation policies
+- IAM roles vs users for applications
+- AssumeRole trust policies and External ID
+- Service Control Policies (SCPs)
 
-# Filtrer par catégorie
-GET /questions?category=iam
+### VPC & Network Security (7+ questions)
+- VPC architecture and isolation
+- Security Groups best practices
+- VPC Flow Logs configuration
+- Network ACLs implementation
+- VPC Endpoints usage
+- AWS PrivateLink deployment
+- Network Firewall inspection
 
-# Filtrer par sévérité
-GET /questions?severity=critical
+### Additional Services
+More questions available for:
+- EC2 & Compute
+- S3 & Storage
+- RDS & Databases
+- Lambda & Serverless
+- API Gateway
+- CloudFront & CDN
+- CloudTrail & Logging
+- KMS & Encryption
 
-# Filtrer par service AWS
-GET /questions?service=S3
+## Compliance Frameworks
 
-# Filtrer par framework de conformité
-GET /questions?compliance=PCI-DSS
+All questions are mapped to relevant compliance frameworks:
 
-# Combiner plusieurs filtres
-GET /questions?category=network&severity=critical
-
-# Limiter le nombre de résultats
-GET /questions?limit=10
-```
-
-**Exemple de réponse :**
-```json
-{
-  "total": 70,
-  "category": null,
-  "questions": [
-    {
-      "id": "IAM-001",
-      "category": "iam",
-      "question": "Le MFA est-il activé pour le compte root AWS?",
-      "description": "Le compte root a un accès complet à tous les services...",
-      "severity": "critical",
-      "aws_services": ["IAM"],
-      "compliance_frameworks": ["ISO 27001", "SOC2", "PCI-DSS", "HIPAA"],
-      "remediation_steps": [
-        "Se connecter avec le compte root",
-        "Accéder à 'Security Credentials'",
-        "Activer MFA virtuel ou matériel"
-      ],
-      "references": [
-        "https://docs.aws.amazon.com/IAM/latest/UserGuide/id_credentials_mfa.html"
-      ]
-    }
-  ]
-}
-```
-
-#### 4. Question spécifique
-
-```bash
-# Récupérer une question par son ID
-GET /questions/IAM-001
-```
-
-#### 5. Questions par catégorie
-
-```bash
-# Récupérer toutes les questions d'une catégorie
-GET /questions/category/iam
-GET /questions/category/network
-GET /questions/category/encryption
-```
-
-#### 6. Questions par sévérité
-
-```bash
-# Récupérer les questions par niveau de sévérité
-GET /severity/critical
-GET /severity/high
-GET /severity/medium
-```
-
-#### 7. Questions par service AWS
-
-```bash
-# Récupérer les questions concernant un service
-GET /service/S3
-GET /service/EC2
-GET /service/RDS
-```
-
-#### 8. Questions par framework de conformité
-
-```bash
-# Récupérer les questions liées à un framework
-GET /compliance/PCI-DSS
-GET /compliance/ISO 27001
-GET /compliance/HIPAA
-```
-
-#### 9. Statistiques
-
-```bash
-# Récupérer des statistiques globales
-GET /stats
-```
-
-**Exemple de réponse :**
-```json
-{
-  "total_questions": 70,
-  "by_category": {
-    "iam": 7,
-    "network": 7,
-    "encryption": 6,
-    ...
-  },
-  "by_severity": {
-    "critical": 18,
-    "high": 25,
-    "medium": 20,
-    ...
-  },
-  "aws_services_covered": ["IAM", "S3", "EC2", "RDS", ...],
-  "compliance_frameworks": ["ISO 27001", "SOC2", "PCI-DSS", ...],
-  "total_services": 35,
-  "total_frameworks": 8
-}
-```
-
-## Exemples d'utilisation
-
-### Avec curl
-
-```bash
-# Récupérer toutes les questions critiques
-curl "http://localhost:8000/questions?severity=critical"
-
-# Récupérer les questions IAM
-curl "http://localhost:8000/questions?category=iam"
-
-# Récupérer une question spécifique
-curl "http://localhost:8000/questions/IAM-001"
-
-# Récupérer les statistiques
-curl "http://localhost:8000/stats"
-```
-
-### Avec Python
-
-```python
-import requests
-
-# Récupérer les questions critiques de sécurité réseau
-response = requests.get(
-    "http://localhost:8000/questions",
-    params={
-        "category": "network",
-        "severity": "critical"
-    }
-)
-
-data = response.json()
-print(f"Nombre de questions: {data['total']}")
-
-for question in data['questions']:
-    print(f"\n[{question['id']}] {question['question']}")
-    print(f"Services: {', '.join(question['aws_services'])}")
-```
-
-### Script d'exemple complet
-
-Un script d'exemple complet est fourni dans `example_usage.py` :
-
-```bash
-python example_usage.py
-```
-
-Ce script démontre :
-- Comment interroger l'API
-- Comment filtrer les questions
-- Comment générer une checklist d'audit complète
-
-## Catégories d'audit
-
-### 1. IAM (Identity and Access Management)
-Questions sur la gestion des identités, permissions, MFA, rotation des clés, principe du moindre privilège.
-
-### 2. Network Security
-Sécurité réseau, VPC, Security Groups, NACLs, WAF, protection DDoS.
-
-### 3. Encryption
-Chiffrement des données au repos et en transit (S3, EBS, RDS, SSL/TLS).
-
-### 4. Logging & Monitoring
-CloudTrail, CloudWatch, VPC Flow Logs, GuardDuty, détection des menaces.
-
-### 5. Compliance & Governance
-AWS Organizations, Service Control Policies, AWS Config, Security Hub, backups.
-
-### 6. Storage Security
-Sécurité S3 (encryption, accès public, versioning, logging).
-
-### 7. Database Security
-Sécurité RDS et DynamoDB (encryption, isolation réseau, backups).
-
-### 8. Application Security
-Lambda, API Gateway, ECR, gestion des secrets, scanning de vulnérabilités.
-
-### 9. Incident Response
-Préparation et réponse aux incidents, forensics, contacts de sécurité.
-
-### 10. Cost Optimization (Security perspective)
-Détection d'activités anormales via les coûts, ressources orphelines.
-
-## Frameworks de conformité supportés
-
-- **ISO 27001** - Norme internationale de gestion de la sécurité de l'information
+- **ISO 27001** - Information Security Management
 - **SOC2** - Service Organization Control 2
 - **PCI-DSS** - Payment Card Industry Data Security Standard
 - **HIPAA** - Health Insurance Portability and Accountability Act
 - **GDPR** - General Data Protection Regulation
-- **CIS AWS Foundations Benchmark** - Best practices de sécurité AWS
-- **OWASP** - Open Web Application Security Project
-- **OWASP API Security** - Sécurité des APIs
+- **CIS AWS Foundations Benchmark** - Industry security best practices
+- **NIST** - National Institute of Standards and Technology
+- **AWS Well-Architected Framework** - Security Pillar
 
-## Services AWS couverts
+## Technical Details
 
-IAM, EC2, VPC, S3, RDS, DynamoDB, CloudTrail, CloudWatch, KMS, Lambda, API Gateway, CloudFront, ALB, EBS, EFS, GuardDuty, Security Hub, Config, Organizations, WAF, Secrets Manager, Systems Manager, ECR, ECS, EKS, Route53, SNS, Budgets, et plus.
+### Question Structure
 
-## Structure du projet
+Each question includes:
 
-```
-Machine71/
-├── main.py                 # Application FastAPI principale
-├── models.py              # Modèles Pydantic (Question, Category, etc.)
-├── audit_questions.py     # Base de données des questions d'audit
-├── requirements.txt       # Dépendances Python
-├── example_usage.py       # Script d'exemple d'utilisation
-├── .env.example          # Exemple de configuration
-├── .gitignore            # Fichiers à ignorer par Git
-└── README.md             # Cette documentation
-```
+- **ID**: Unique identifier (e.g., IAM-001, VPC-002)
+- **Question**: Clear, actionable security question
+- **Description**: Context and importance
+- **Severity**: CRITICAL, HIGH, MEDIUM, LOW
+- **Category**: AWS service category
+- **Technical Details**: In-depth technical explanation
+- **Remediation Steps**: Step-by-step fix instructions with CLI commands
+- **Verification Steps**: Commands to verify compliance
+- **References**: Official AWS documentation links
+- **Compliance Mapping**: Relevant frameworks
 
-## Configuration
-
-Créer un fichier `.env` à partir de `.env.example` :
-
-```bash
-cp .env.example .env
-```
-
-Variables disponibles :
-- `API_HOST` : Hôte de l'API (défaut: 0.0.0.0)
-- `API_PORT` : Port de l'API (défaut: 8000)
-- `API_RELOAD` : Auto-reload en dev (défaut: True)
-- `ENVIRONMENT` : Environnement (development/production)
-- `LOG_LEVEL` : Niveau de log (info/debug/warning)
-
-## Déploiement en production
-
-### Avec Uvicorn
-
-```bash
-# Installation de uvicorn avec support production
-pip install uvicorn[standard]
-
-# Lancement en production
-uvicorn main:app --host 0.0.0.0 --port 8000 --workers 4
-```
-
-### Avec Docker
-
-Créer un `Dockerfile` :
-
-```dockerfile
-FROM python:3.11-slim
-
-WORKDIR /app
-
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-COPY . .
-
-EXPOSE 8000
-
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
-```
-
-Build et run :
-
-```bash
-docker build -t aws-security-audit-api .
-docker run -p 8000:8000 aws-security-audit-api
-```
-
-### Avec Docker Compose
-
-Créer un `docker-compose.yml` :
-
-```yaml
-version: '3.8'
-
-services:
-  api:
-    build: .
-    ports:
-      - "8000:8000"
-    environment:
-      - ENVIRONMENT=production
-      - LOG_LEVEL=info
-    restart: unless-stopped
-```
-
-```bash
-docker-compose up -d
-```
-
-## Utilisation pour un audit
-
-### 1. Préparation de l'audit
-
-```bash
-# Récupérer toutes les catégories pour planifier l'audit
-curl http://localhost:8000/categories
-```
-
-### 2. Audit par priorité
-
-```bash
-# Commencer par les questions critiques
-curl "http://localhost:8000/questions?severity=critical"
-
-# Puis high
-curl "http://localhost:8000/questions?severity=high"
-```
-
-### 3. Audit par domaine
-
-```bash
-# Audit IAM
-curl "http://localhost:8000/questions/category/iam"
-
-# Audit Network
-curl "http://localhost:8000/questions/category/network"
-```
-
-### 4. Audit de conformité
-
-```bash
-# Audit PCI-DSS
-curl "http://localhost:8000/compliance/PCI-DSS"
-
-# Audit HIPAA
-curl "http://localhost:8000/compliance/HIPAA"
-```
-
-### 5. Générer un rapport
-
-Utiliser le script `example_usage.py` pour générer une checklist complète :
-
-```bash
-python example_usage.py > rapport_audit.txt
-```
-
-## Contribution
-
-Les contributions sont les bienvenues ! Pour ajouter de nouvelles questions :
-
-1. Éditer `audit_questions.py`
-2. Ajouter une nouvelle `AuditQuestion` dans la liste `AUDIT_QUESTIONS`
-3. Suivre le format existant avec tous les champs requis
-4. Tester l'API
-
-Exemple de nouvelle question :
+### Example Question Format
 
 ```python
-AuditQuestion(
-    id="IAM-008",
-    category=AuditCategory.IAM,
-    question="Votre question ici?",
-    description="Description détaillée",
-    severity=SeverityLevel.HIGH,
-    aws_services=["IAM"],
-    compliance_frameworks=["ISO 27001"],
-    remediation_steps=[
-        "Étape 1",
-        "Étape 2"
+Question(
+    id="IAM-002",
+    question="MFA obligatoire pour tous les utilisateurs privilégiés?",
+    description="Vérification que l'authentification multi-facteurs...",
+    severity="CRITICAL",
+    category="IAM",
+    compliance=["ISO 27001", "SOC2", "PCI-DSS", "HIPAA"],
+    technical_details="""
+    Types de MFA acceptables:
+    - Hardware MFA: YubiKey, Gemalto
+    - Virtual MFA: Google Authenticator, Authy
+    ...
+    """,
+    remediation=[
+        "Root account: IAM Dashboard > Security credentials > MFA",
+        "Créer une policy IAM conditionnelle exigeant MFA",
+        ...
     ],
-    references=["https://docs.aws.amazon.com/..."]
+    verification_steps=[
+        "aws iam get-credential-report",
+        "grep -v 'mfa_active.*true' report.csv",
+        ...
+    ],
+    references=[
+        "https://docs.aws.amazon.com/IAM/latest/UserGuide/id_credentials_mfa.html"
+    ]
 )
 ```
 
-## Licence
+## Use Cases
 
-MIT License
+### Security Consultants
+- Conduct client audits during workshops
+- Generate professional reports
+- Track findings and recommendations
+- Document client architecture
+
+### Internal Audit Teams
+- Regular security assessments
+- Compliance verification
+- Track remediation progress
+- Generate audit trails
+
+### DevSecOps Teams
+- Pre-deployment security checks
+- Architecture review
+- Security baseline verification
+- Continuous compliance monitoring
+
+## Development Roadmap
+
+- [ ] Add 100+ more questions for remaining AWS services
+- [ ] CloudFormation/Terraform integration for automated checks
+- [ ] Multi-language support (English, Spanish, German)
+- [ ] Integration with AWS Security Hub
+- [ ] Automated scanning capabilities
+- [ ] Custom question templates
+- [ ] Team collaboration features
+- [ ] API for CI/CD integration
+
+## Contributing
+
+Contributions are welcome! To add new questions:
+
+1. Edit `data/aws_services_questions.py`
+2. Follow the existing question structure
+3. Include comprehensive technical details
+4. Add CLI verification commands
+5. Link to official AWS documentation
+6. Test the question in the interface
+
+## Best Practices
+
+### During Client Workshops
+
+1. **Preparation**
+   - Review client's AWS architecture beforehand
+   - Customize questions if needed
+   - Prepare examples relevant to their industry
+
+2. **During Audit**
+   - Use Architecture Diagram to map infrastructure
+   - Take detailed notes for each finding
+   - Assign accurate risk levels
+   - Save session frequently
+
+3. **Post-Audit**
+   - Review all findings
+   - Generate comprehensive report
+   - Share recommendations with prioritization
+   - Schedule follow-up reviews
+
+### Session Management
+
+- Save sessions after each service category
+- Use descriptive session names
+- Export intermediate reports
+- Keep backup copies of critical audits
+
+## Troubleshooting
+
+### Application won't start
+
+```bash
+# Check Python version
+python --version  # Should be 3.8+
+
+# Reinstall dependencies
+pip install -r requirements.txt --force-reinstall
+
+# Clear Streamlit cache
+streamlit cache clear
+```
+
+### Port already in use
+
+```bash
+# Use different port
+streamlit run app.py --server.port 8502
+```
+
+### PDF export not working
+
+```bash
+# Install reportlab separately
+pip install reportlab
+```
+
+## License
+
+MIT License - See LICENSE file for details
 
 ## Support
 
-Pour toute question ou suggestion :
-- Créer une issue sur GitHub
-- Email : security-audit@example.com
+For issues, questions, or contributions:
+- GitHub Issues: https://github.com/K3E9X/Machine71/issues
+- Documentation: See docs/ folder for detailed guides
 
-## Ressources
+## Acknowledgments
 
-- [AWS Security Best Practices](https://aws.amazon.com/security/best-practices/)
-- [CIS AWS Foundations Benchmark](https://www.cisecurity.org/benchmark/amazon_web_services)
-- [AWS Well-Architected Framework - Security Pillar](https://docs.aws.amazon.com/wellarchitected/latest/security-pillar/welcome.html)
-- [AWS Security Documentation](https://docs.aws.amazon.com/security/)
+- AWS Security Best Practices documentation
+- CIS AWS Foundations Benchmark
+- AWS Well-Architected Framework
+- Security community contributions
 
-## Changelog
+---
 
-### Version 1.0.0 (2025-10-26)
+**Built for security professionals, by security professionals**
 
-- Version initiale
-- 70+ questions d'audit
-- 10 catégories de sécurité
-- Support de 8 frameworks de conformité
-- API REST complète avec filtres
-- Documentation interactive Swagger/OpenAPI
+*Professional AWS security auditing made simple and effective*
