@@ -1876,6 +1876,19 @@ S3_QUESTIONS = [
             "https://docs.aws.amazon.com/AmazonS3/latest/userguide/UsingKMSEncryption.html",
             "https://aws.amazon.com/blogs/security/how-to-prevent-uploads-of-unencrypted-objects-to-amazon-s3/"
         ]
+    ),
+
+    Question(
+        id="S3-003",
+        question="S3 versioning activé avec MFA Delete et lifecycle policies configurées (Glacier, expiration)?",
+        description="Vérifier versioning pour protection données et lifecycle pour optimisation coûts",
+        severity="MEDIUM",
+        category="S3",
+        compliance=["Data Protection", "FinOps"],
+        technical_details="Versioning garde historique objets. MFA Delete protège contre suppression malveillante. Lifecycle: transition Glacier après X jours, expiration objets anciens",
+        remediation=["put-bucket-versioning MFADelete=Enabled", "put-bucket-lifecycle-configuration transitions", "Intelligent-Tiering pour auto-optimization"],
+        verification_steps=["get-bucket-versioning", "get-bucket-lifecycle-configuration", "S3 Storage Lens metrics par classe"],
+        references=["https://docs.aws.amazon.com/AmazonS3/latest/userguide/Versioning.html", "https://docs.aws.amazon.com/AmazonS3/latest/userguide/object-lifecycle-mgmt.html"]
     )
 ]
 
