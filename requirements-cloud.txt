@@ -1,0 +1,28 @@
+# Requirements optimisé pour Streamlit Cloud
+# Versions testées et compatibles avec Streamlit Cloud
+
+# Core Streamlit - version stable pour Streamlit Cloud
+streamlit==1.32.2
+
+# Data visualization
+plotly==5.20.0
+pandas==2.2.0
+numpy==1.26.4
+
+# Validation
+pydantic==2.6.3
+
+# Utils
+python-dotenv==1.0.1
+
+# Export
+markdown==3.5.2
+reportlab==4.1.0
+Pillow==10.2.0
+
+# Streamlit components - versions compatibles Cloud
+streamlit-drawable-canvas==0.9.3
+streamlit-agraph==0.0.45
+
+# Note: Ce fichier utilise des versions exactes pour assurer
+# la compatibilité avec Streamlit Cloud

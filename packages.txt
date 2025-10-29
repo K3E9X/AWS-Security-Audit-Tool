@@ -1,0 +1,6 @@
+# System packages for Streamlit Cloud
+# Only needed for certain dependencies
+
+# Uncomment if you need these:
+# build-essential
+# cmake
