@@ -6,6 +6,8 @@ A modern, professional security audit tool designed for security consultants and
 
 🌐 **[Try Live Demo on Streamlit Cloud](https://aws-security-audit-tool.streamlit.app)**
 
+<img width="1494" height="739" alt="image" src="https://github.com/user-attachments/assets/4b99b4ec-d89d-47c0-9fa6-1786e447c2dd" />
+
 ## Overview
 
 This tool provides an interactive web interface for conducting thorough AWS security audits with:
