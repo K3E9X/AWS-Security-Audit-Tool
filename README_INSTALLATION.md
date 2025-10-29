@@ -14,9 +14,11 @@ Ce document explique comment installer et tester l'AWS Security Audit Tool.
 
 ## 🔧 Installation
 
+> **🍎 Utilisateurs macOS**: Consultez le guide spécifique [README_MACOS.md](README_MACOS.md) pour éviter les erreurs de compilation numpy/pandas.
+
 ### Prérequis
 
-- Python 3.11 ou supérieur
+- Python 3.9 ou supérieur (recommandé: 3.11)
 - pip (gestionnaire de paquets Python)
 
 ### Étapes d'installation
@@ -46,12 +48,17 @@ Ce document explique comment installer et tester l'AWS Security Audit Tool.
 
 3. **Lancer l'application**
 
-   **Option A: Utiliser le script de lancement** (recommandé)
+   **Sur Linux:**
    ```bash
    ./run.sh
    ```
 
-   **Option B: Lancer manuellement**
+   **Sur macOS:**
+   ```bash
+   ./run-macos.sh
+   ```
+
+   **Lancement manuel:**
    ```bash
    streamlit run app.py
    ```

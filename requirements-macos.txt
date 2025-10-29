@@ -1,0 +1,19 @@
+# Configuration optimisée pour macOS
+# Utilise des versions plus récentes avec wheels précompilés pour éviter les erreurs de compilation
+
+# Core dependencies - versions récentes compatibles macOS
+streamlit>=1.32.0
+plotly>=5.20.0
+pandas>=2.2.0
+numpy>=1.26.0
+pydantic>=2.6.0
+python-dotenv>=1.0.0
+
+# Export et documentation
+markdown>=3.5.0
+reportlab>=4.1.0
+Pillow>=10.2.0
+
+# Composants Streamlit
+streamlit-drawable-canvas>=0.9.3
+streamlit-agraph>=0.0.45

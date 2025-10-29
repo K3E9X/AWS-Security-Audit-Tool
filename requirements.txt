@@ -1,10 +1,14 @@
-streamlit==1.29.0
-plotly==5.18.0
-pandas==2.1.4
-pydantic==2.5.3
-python-dotenv==1.0.0
-markdown==3.5.1
-reportlab==4.0.7
-Pillow==10.1.0
-streamlit-drawable-canvas==0.9.3
-streamlit-agraph==0.0.45
+# Configuration compatible Linux et versions récentes
+# Pour macOS, utiliser: pip install -r requirements-macos.txt
+
+streamlit>=1.32.0
+plotly>=5.20.0
+pandas>=2.2.0
+numpy>=1.26.0
+pydantic>=2.6.0
+python-dotenv>=1.0.0
+markdown>=3.5.0
+reportlab>=4.1.0
+Pillow>=10.2.0
+streamlit-drawable-canvas>=0.9.3
+streamlit-agraph>=0.0.45
