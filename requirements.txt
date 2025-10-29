@@ -1,14 +1,24 @@
-# Configuration compatible Linux et versions récentes
-# Pour macOS, utiliser: pip install -r requirements-macos.txt
+# Requirements principal - Compatible Streamlit Cloud
+# Pour macOS local: utiliser requirements-macos.txt
 
-streamlit>=1.32.0
-plotly>=5.20.0
-pandas>=2.2.0
-numpy>=1.26.0
-pydantic>=2.6.0
-python-dotenv>=1.0.0
-markdown>=3.5.0
-reportlab>=4.1.0
-Pillow>=10.2.0
-streamlit-drawable-canvas>=0.9.3
-streamlit-agraph>=0.0.45
+# IMPORTANT: Streamlit Cloud nécessite des versions EXACTES (==)
+# pour assurer la compatibilité et éviter les erreurs de build
+
+# Core - versions exactes testées et compatibles
+streamlit==1.32.2
+plotly==5.20.0
+pandas==2.2.0
+numpy==1.26.4
+
+# Validation
+pydantic==2.6.3
+python-dotenv==1.0.1
+
+# Export
+markdown==3.5.2
+reportlab==4.1.0
+Pillow==10.2.0
+
+# Streamlit components
+streamlit-drawable-canvas==0.9.3
+streamlit-agraph==0.0.45
