@@ -4552,6 +4552,695 @@ RDS_QUESTIONS = [
             "https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_PerfInsights.html",
             "https://aws.amazon.com/rds/performance-insights/"
         ]
+    ),
+
+    Question(
+        id="RDS-007",
+        question="IAM Database Authentication activée pour accès DB sans password stockés/rotés?",
+        description="Vérifier que IAM Database Authentication est utilisée pour authentification temporaire via tokens IAM au lieu de passwords statiques",
+        severity="HIGH",
+        category="RDS",
+        compliance=["AWS Well-Architected", "Least Privilege", "Zero Trust"],
+        technical_details="""
+        IAM Database Authentication = auth DB via IAM tokens
+
+        Fonctionnement:
+        - Application obtient auth token via AWS SDK (GetAuthToken)
+        - Token valide 15 minutes
+        - Token utilisé comme password pour connexion DB
+        - Authentification via SSL/TLS obligatoire
+        - Credentials jamais stockés dans app
+
+        Avantages vs passwords:
+        - Pas de password statique à gérer
+        - Pas de rotation password nécessaire
+        - Credentials temporaires (15 min)
+        - Audit via CloudTrail (qui obtient tokens)
+        - Integration IAM: policies, roles, MFA
+        - Révocation instantanée via IAM policy
+
+        Engines supportés:
+        - MySQL 5.6+ (pas MariaDB)
+        - PostgreSQL 9.5+
+        - Aurora MySQL
+        - Aurora PostgreSQL
+
+        Limitations:
+        - Max 200 connexions/seconde par DB instance
+        - SSL/TLS requis (overhead performance)
+        - Application doit régénérer tokens avant expiration
+        - Pas supporté: SQL Server, Oracle, MariaDB
+
+        Architecture typique:
+        - Lambda function avec IAM role
+        - IAM policy: rds-db:connect sur resource DB user
+        - Function génère token avec rds.generate_db_auth_token()
+        - Connexion DB avec token comme password
+        - Token expiré → régénérer automatiquement
+
+        Use cases:
+        - Applications serverless (Lambda, ECS)
+        - Microservices avec IAM roles
+        - Environnements highly regulated (no static passwords)
+        - Short-lived connections (IAM token parfait)
+        - Centralized access management via IAM
+
+        Vs alternatives:
+        1. Static passwords: rotation complexe, risque leak
+        2. Secrets Manager: coût, latency, still passwords
+        3. IAM DB Auth: gratuit, zero management, temporary
+        """,
+        remediation=[
+            "1. Activer IAM Database Authentication sur RDS:",
+            "   aws rds modify-db-instance \\",
+            "     --db-instance-identifier mydb \\",
+            "     --enable-iam-database-authentication \\",
+            "     --apply-immediately",
+            "",
+            "   # Pour Aurora cluster:",
+            "   aws rds modify-db-cluster \\",
+            "     --db-cluster-identifier mycluster \\",
+            "     --enable-iam-database-authentication",
+            "",
+            "2. Créer DB user avec IAM authentication:",
+            "   # MySQL:",
+            "   CREATE USER 'iamuser' IDENTIFIED WITH AWSAuthenticationPlugin AS 'RDS';",
+            "   GRANT SELECT, INSERT, UPDATE ON mydb.* TO 'iamuser'@'%';",
+            "",
+            "   # PostgreSQL:",
+            "   CREATE USER iamuser;",
+            "   GRANT rds_iam TO iamuser;",
+            "   GRANT CONNECT ON DATABASE mydb TO iamuser;",
+            "",
+            "3. Créer IAM policy pour DB user access:",
+            "   {",
+            '     "Version": "2012-10-17",',
+            '     "Statement": [{',
+            '       "Effect": "Allow",',
+            '       "Action": "rds-db:connect",',
+            '       "Resource": "arn:aws:rds-db:region:account:dbuser:db-RESOURCEID/iamuser"',
+            "     }]",
+            "   }",
+            "",
+            "   # Récupérer Resource ID:",
+            "   aws rds describe-db-instances \\",
+            "     --db-instance-identifier mydb \\",
+            "     --query 'DBInstances[0].DbiResourceId'",
+            "",
+            "4. Attacher policy à IAM role (Lambda, EC2, etc.):",
+            "   aws iam attach-role-policy \\",
+            "     --role-name MyAppRole \\",
+            "     --policy-arn arn:aws:iam::account:policy/RDSIAMAuthPolicy",
+            "",
+            "5. Code application pour générer token (Python):",
+            "   import boto3",
+            "   import pymysql",
+            "",
+            "   rds = boto3.client('rds')",
+            "   ",
+            "   # Générer auth token",
+            "   token = rds.generate_db_auth_token(",
+            "     DBHostname='mydb.region.rds.amazonaws.com',",
+            "     Port=3306,",
+            "     DBUsername='iamuser',",
+            "     Region='us-east-1'",
+            "   )",
+            "",
+            "   # Connexion avec token",
+            "   conn = pymysql.connect(",
+            "     host='mydb.region.rds.amazonaws.com',",
+            "     user='iamuser',",
+            "     password=token,  # Token as password",
+            "     database='mydb',",
+            "     ssl_ca='/path/to/rds-ca-bundle.pem',  # SSL requis",
+            "     ssl_verify_cert=True",
+            "   )",
+            "",
+            "6. NodeJS exemple:",
+            "   const AWS = require('aws-sdk');",
+            "   const mysql = require('mysql2/promise');",
+            "",
+            "   const signer = new AWS.RDS.Signer({",
+            "     region: 'us-east-1',",
+            "     hostname: 'mydb.region.rds.amazonaws.com',",
+            "     port: 3306,",
+            "     username: 'iamuser'",
+            "   });",
+            "",
+            "   const token = await signer.getAuthToken();",
+            "",
+            "   const connection = await mysql.createConnection({",
+            "     host: 'mydb.region.rds.amazonaws.com',",
+            "     user: 'iamuser',",
+            "     password: token,",
+            "     database: 'mydb',",
+            "     ssl: 'Amazon RDS'",
+            "   });",
+            "",
+            "7. Télécharger RDS CA bundle pour SSL:",
+            "   wget https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem",
+            "",
+            "8. Monitoring usage IAM auth:",
+            "   CloudTrail: rechercher GenerateDataKey events",
+            "   CloudWatch metric: DatabaseConnections",
+            "",
+            "9. Désactiver password authentication (force IAM only):",
+            "   # MySQL: supprimer users avec mysql_native_password",
+            "   # PostgreSQL: configurer pg_hba.conf (managed, use IAM users only)"
+        ],
+        verification_steps=[
+            "Vérifier IAM DB Auth activé:",
+            "  aws rds describe-db-instances \\",
+            "    --db-instance-identifier mydb \\",
+            "    --query 'DBInstances[0].IAMDatabaseAuthenticationEnabled'",
+            "  # Expected: true",
+            "",
+            "Lister DB instances sans IAM auth:",
+            "  aws rds describe-db-instances \\",
+            "    --query 'DBInstances[?IAMDatabaseAuthenticationEnabled==`false`].[DBInstanceIdentifier,Engine]'",
+            "",
+            "Récupérer Resource ID pour IAM policy:",
+            "  aws rds describe-db-instances \\",
+            "    --db-instance-identifier mydb \\",
+            "    --query 'DBInstances[0].DbiResourceId' \\",
+            "    --output text",
+            "",
+            "Tester génération token (CLI):",
+            "  aws rds generate-db-auth-token \\",
+            "    --hostname mydb.region.rds.amazonaws.com \\",
+            "    --port 3306 \\",
+            "    --username iamuser \\",
+            "    --region us-east-1",
+            "  # Devrait retourner un token JWT-like",
+            "",
+            "Vérifier DB users IAM (MySQL):",
+            "  mysql> SELECT user, host, plugin FROM mysql.user WHERE plugin='AWSAuthenticationPlugin';",
+            "",
+            "Vérifier DB users IAM (PostgreSQL):",
+            "  SELECT rolname FROM pg_roles WHERE rolname IN (",
+            "    SELECT member::regrole::text FROM pg_auth_members WHERE roleid = 'rds_iam'::regrole",
+            "  );",
+            "",
+            "Test connexion avec IAM token:",
+            "  # Python:",
+            "  python test_iam_connection.py",
+            "  # Devrait réussir connexion sans erreur",
+            "",
+            "CloudTrail audit - voir qui obtient tokens:",
+            "  aws cloudtrail lookup-events \\",
+            "    --lookup-attributes AttributeKey=EventName,AttributeValue=GenerateDataKey \\",
+            "    --max-results 50",
+            "",
+            "Vérifier SSL enforced:",
+            "  # MySQL:",
+            "  SHOW VARIABLES LIKE 'require_secure_transport';",
+            "  # Should be ON",
+            "",
+            "  # PostgreSQL:",
+            "  SHOW ssl;",
+            "  # Should be on"
+        ],
+        references=[
+            "https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/UsingWithRDS.IAMDBAuth.html",
+            "https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/UsingWithRDS.IAMDBAuth.Connecting.html",
+            "https://aws.amazon.com/blogs/database/using-iam-authentication-to-connect-with-sql-workbenchj-to-amazon-aurora-mysql-or-amazon-rds-for-mysql/"
+        ]
+    ),
+
+    Question(
+        id="RDS-008",
+        question="RDS Proxy déployé pour connection pooling, failover automatique et sécurité credentials?",
+        description="Vérifier que RDS Proxy est utilisé pour gérer pool de connexions DB, améliorer failover et stocker credentials de manière sécurisée",
+        severity="MEDIUM",
+        category="RDS",
+        compliance=["AWS Well-Architected", "High Availability"],
+        technical_details="""
+        RDS Proxy = managed connection pooler pour RDS/Aurora
+
+        Avantages RDS Proxy:
+        1. Connection pooling:
+           - Réduit overhead connexions DB
+           - Réutilise connexions existantes
+           - Évite épuisement max_connections DB
+           - Idéal pour serverless (Lambda spike)
+
+        2. Improved failover:
+           - Détection failure 66% plus rapide qu'app
+           - Réduction downtime jusqu'à 79%
+           - Connexions préservées pendant failover
+           - Transparent pour application
+
+        3. Security:
+           - Credentials stockés dans Secrets Manager
+           - Rotation automatique sans redémarrage app
+           - IAM authentication supportée
+           - Enforce SSL/TLS connections
+           - Pas de credentials dans code
+
+        4. Observability:
+           - CloudWatch metrics détaillées
+           - Logs query performance
+           - Monitoring connection pool
+
+        Architecture:
+        App → RDS Proxy (VPC) → RDS/Aurora
+        - Proxy dans subnets privés
+        - Security Group control access
+        - ENI dans subnet (HA multi-AZ)
+
+        Engines supportés:
+        - MySQL (5.6+)
+        - PostgreSQL (10+)
+        - Aurora MySQL
+        - Aurora PostgreSQL
+        - MariaDB (10.2+)
+
+        Use cases:
+        - Applications serverless (Lambda)
+        - Microservices avec bursty traffic
+        - Pooling pour réduire connexions DB
+        - Failover automatique sans code change
+        - Rotation credentials sans downtime
+
+        Pinning vs pooling:
+        - Pinned: connexion dédiée (session variables)
+        - Pooled: connexions partagées (défaut)
+        - Certaines operations forcent pinning (PREPARE)
+
+        Coût:
+        - $0.015/hour per vCPU
+        - 2 vCPU minimum (HA)
+        - ~$22/month minimum
+
+        Limitations:
+        - Latency: +1-2ms vs direct connection
+        - Pas de support: SQL Server, Oracle
+        - Pinning réduit efficiency pooling
+        """,
+        remediation=[
+            "1. Créer secret pour DB credentials:",
+            "   aws secretsmanager create-secret \\",
+            "     --name rds-db-credentials \\",
+            "     --secret-string '{",
+            '       "username": "admin",',
+            '       "password": "SecurePassword123!",',
+            '       "engine": "mysql",',
+            '       "host": "mydb.region.rds.amazonaws.com",',
+            '       "port": 3306,',
+            '       "dbname": "mydb"',
+            "     }'",
+            "",
+            "2. Créer IAM role pour RDS Proxy:",
+            "   aws iam create-role \\",
+            "     --role-name rds-proxy-role \\",
+            "     --assume-role-policy-document '{",
+            '       "Version": "2012-10-17",',
+            '       "Statement": [{',
+            '         "Effect": "Allow",',
+            '         "Principal": {"Service": "rds.amazonaws.com"},',
+            '         "Action": "sts:AssumeRole"',
+            "       }]",
+            "     }'",
+            "",
+            "   # Attacher policy Secrets Manager:",
+            "   aws iam attach-role-policy \\",
+            "     --role-name rds-proxy-role \\",
+            "     --policy-arn arn:aws:iam::aws:policy/SecretsManagerReadWrite",
+            "",
+            "3. Créer RDS Proxy:",
+            "   aws rds create-db-proxy \\",
+            "     --db-proxy-name mydb-proxy \\",
+            "     --engine-family MYSQL \\",
+            "     --auth '[{",
+            '       "AuthScheme": "SECRETS",',
+            '       "SecretArn": "arn:aws:secretsmanager:region:account:secret:rds-db-credentials",',
+            '       "IAMAuth": "DISABLED"',  # or REQUIRED for IAM",
+            "     }]' \\",
+            "     --role-arn arn:aws:iam::account:role/rds-proxy-role \\",
+            "     --vpc-subnet-ids subnet-1 subnet-2 subnet-3 \\",
+            "     --require-tls",
+            "",
+            "4. Configurer target (RDS instance ou Aurora cluster):",
+            "   aws rds register-db-proxy-targets \\",
+            "     --db-proxy-name mydb-proxy \\",
+            "     --db-instance-identifiers mydb",
+            "",
+            "   # Pour Aurora cluster:",
+            "   aws rds register-db-proxy-targets \\",
+            "     --db-proxy-name mydb-proxy \\",
+            "     --db-cluster-identifiers mycluster",
+            "",
+            "5. Configurer Security Group proxy:",
+            "   aws ec2 authorize-security-group-ingress \\",
+            "     --group-id sg-proxy \\",
+            "     --protocol tcp \\",
+            "     --port 3306 \\",
+            "     --source-group sg-app  # Lambda/ECS security group",
+            "",
+            "6. Modifier DB Security Group (autoriser proxy):",
+            "   aws ec2 authorize-security-group-ingress \\",
+            "     --group-id sg-db \\",
+            "     --protocol tcp \\",
+            "     --port 3306 \\",
+            "     --source-group sg-proxy",
+            "",
+            "7. Obtenir endpoint proxy:",
+            "   aws rds describe-db-proxies \\",
+            "     --db-proxy-name mydb-proxy \\",
+            "     --query 'DBProxies[0].Endpoint'",
+            "",
+            "8. Modifier app pour utiliser proxy endpoint:",
+            "   # Au lieu de: mydb.region.rds.amazonaws.com",
+            "   # Utiliser: mydb-proxy.proxy-xxxxx.region.rds.amazonaws.com",
+            "",
+            "   # Python:",
+            "   conn = pymysql.connect(",
+            "     host='mydb-proxy.proxy-xxxxx.region.rds.amazonaws.com',",
+            "     user='admin',",
+            "     password='password',  # Ou IAM token",
+            "     database='mydb'",
+            "   )",
+            "",
+            "9. Configurer connection pool settings:",
+            "   aws rds modify-db-proxy \\",
+            "     --db-proxy-name mydb-proxy \\",
+            "     --connection-pool-config '{",
+            '       "MaxConnectionsPercent": 90,',  # 90% of max_connections",
+            '       "MaxIdleConnectionsPercent": 50,',
+            '       "ConnectionBorrowTimeout": 120,',  # seconds",
+            '       "SessionPinningFilters": ["EXCLUDE_VARIABLE_SETS"]',
+            "     }'",
+            "",
+            "10. Activer CloudWatch Logs:",
+            "    aws rds modify-db-proxy \\",
+            "      --db-proxy-name mydb-proxy \\",
+            "      --debug-logging",
+            "",
+            "11. Rotation automatique credentials:",
+            "    aws secretsmanager rotate-secret \\",
+            "      --secret-id rds-db-credentials \\",
+            "      --rotation-lambda-arn arn:aws:lambda:region:account:function:SecretsManagerRDSRotation \\",
+            "      --rotation-rules AutomaticallyAfterDays=30"
+        ],
+        verification_steps=[
+            "Lister RDS Proxies:",
+            "  aws rds describe-db-proxies",
+            "",
+            "Vérifier status proxy:",
+            "  aws rds describe-db-proxies --db-proxy-name mydb-proxy \\",
+            "    --query 'DBProxies[0].[DBProxyName,Status,Endpoint,RequireTLS]'",
+            "  # Expected Status: available",
+            "",
+            "Vérifier targets enregistrés:",
+            "  aws rds describe-db-proxy-targets --db-proxy-name mydb-proxy",
+            "",
+            "Test connexion via proxy:",
+            "  mysql -h mydb-proxy.proxy-xxxxx.region.rds.amazonaws.com -u admin -p",
+            "  # Devrait se connecter normalement",
+            "",
+            "CloudWatch metrics - connexions:",
+            "  aws cloudwatch get-metric-statistics \\",
+            "    --namespace AWS/RDS \\",
+            "    --metric-name DatabaseConnections \\",
+            "    --dimensions Name=DBProxyName,Value=mydb-proxy \\",
+            "    --start-time 2024-01-15T00:00:00Z \\",
+            "    --end-time 2024-01-15T23:59:59Z \\",
+            "    --period 3600 \\",
+            "    --statistics Average,Maximum",
+            "",
+            "Vérifier connection pool efficiency:",
+            "  # CloudWatch metric: ClientConnections vs DatabaseConnections",
+            "  # Ratio > 1 = pooling works (multiple clients share DB connections)",
+            "",
+            "Vérifier debug logs (si activé):",
+            "  aws logs tail /aws/rds/proxy/mydb-proxy --follow",
+            "",
+            "Test failover behavior:",
+            "  # Déclencher failover Aurora:",
+            "  aws rds failover-db-cluster --db-cluster-identifier mycluster",
+            "  # App connections via proxy devraient rester up",
+            "",
+            "Vérifier Security Groups:",
+            "  aws ec2 describe-security-groups --group-ids sg-proxy --query 'SecurityGroups[].IpPermissions'",
+            "",
+            "Vérifier secret rotation:",
+            "  aws secretsmanager describe-secret --secret-id rds-db-credentials \\",
+            "    --query 'RotationEnabled'",
+            "",
+            "Performance test - latency overhead:",
+            "  # Direct: ~5ms",
+            "  # Via Proxy: ~6-7ms (+1-2ms overhead acceptable)"
+        ],
+        references=[
+            "https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/rds-proxy.html",
+            "https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/rds-proxy.html",
+            "https://aws.amazon.com/blogs/compute/using-amazon-rds-proxy-with-aws-lambda/"
+        ]
+    ),
+
+    Question(
+        id="RDS-009",
+        question="Database audit logging activé et intégré à CloudWatch Logs pour compliance et forensics?",
+        description="Vérifier que audit logs sont activés sur RDS/Aurora (query logs, error logs, slow query) et exportés vers CloudWatch pour retention et analyse",
+        severity="HIGH",
+        category="RDS",
+        compliance=["PCI-DSS", "HIPAA", "SOC2", "GDPR", "Audit Trail"],
+        technical_details="""
+        RDS Audit Logging = capture activité DB pour compliance
+
+        Types de logs RDS:
+        1. Error logs:
+           - Erreurs DB engine
+           - Warnings et informational messages
+           - Toujours activé par défaut
+
+        2. Slow query logs (MySQL/MariaDB):
+           - Queries > long_query_time threshold
+           - Queries sans index (log_queries_not_using_indexes)
+           - Performance tuning
+
+        3. General logs (MySQL/MariaDB):
+           - Toutes queries SQL
+           - Connexions/déconnexions clients
+           - ATTENTION: performance impact, volume élevé
+
+        4. Audit logs (MySQL/MariaDB via plugin):
+           - Connexions (successful/failed)
+           - Queries par user
+           - Schema changes (DDL)
+           - Compliance requirements
+
+        5. PostgreSQL logs:
+           - Connection logs
+           - Disconnection logs
+           - DDL statements
+           - DML statements (configurable)
+
+        Aurora Advanced Auditing:
+        - Audit Plugin pour MySQL/MariaDB
+        - Capture: CONNECTION, QUERY, TABLE, QUERY_DDL, QUERY_DML
+        - Filtrage granulaire par user/database/table
+        - Lower performance impact vs general log
+
+        CloudWatch Logs integration:
+        - Export automatique logs RDS → CloudWatch
+        - Retention configurable (1 jour à 10 ans)
+        - Analyse avec CloudWatch Logs Insights
+        - Alarmes sur patterns (failed logins, DROP TABLE, etc.)
+        - Export S3 pour archivage long-term
+
+        Compliance use cases:
+        - PCI-DSS: tracking all access to cardholder data
+        - HIPAA: audit trail for PHI access
+        - GDPR: logging personal data access
+        - SOC2: monitoring privileged operations
+
+        Performance impact:
+        - Error logs: minimal
+        - Slow query: low (only slow queries)
+        - General log: HIGH (avoid in production)
+        - Audit log: medium (filter to minimize)
+
+        Retention best practices:
+        - Production: 90 days minimum (compliance)
+        - CloudWatch: 30-90 days
+        - S3 archive: 7 years (regulatory)
+        - Glacier: long-term cold storage
+        """,
+        remediation=[
+            "1. Activer slow query log (MySQL/MariaDB):",
+            "   # Créer/modifier parameter group:",
+            "   aws rds create-db-parameter-group \\",
+            "     --db-parameter-group-name mysql-audit-params \\",
+            "     --db-parameter-group-family mysql8.0 \\",
+            "     --description 'MySQL with audit logging'",
+            "",
+            "   # Configurer slow query log:",
+            "   aws rds modify-db-parameter-group \\",
+            "     --db-parameter-group-name mysql-audit-params \\",
+            "     --parameters \\",
+            "       'ParameterName=slow_query_log,ParameterValue=1,ApplyMethod=immediate' \\",
+            "       'ParameterName=long_query_time,ParameterValue=2,ApplyMethod=immediate' \\",
+            "       'ParameterName=log_queries_not_using_indexes,ParameterValue=1,ApplyMethod=immediate'",
+            "",
+            "2. Activer general log (MySQL - USE WITH CAUTION):",
+            "   aws rds modify-db-parameter-group \\",
+            "     --db-parameter-group-name mysql-audit-params \\",
+            "     --parameters 'ParameterName=general_log,ParameterValue=1,ApplyMethod=immediate'",
+            "",
+            "3. Configurer Aurora MySQL Audit Plugin:",
+            "   # Parameter group:",
+            "   aws rds modify-db-cluster-parameter-group \\",
+            "     --db-cluster-parameter-group-name aurora-mysql-audit \\",
+            "     --parameters \\",
+            "       'ParameterName=server_audit_logging,ParameterValue=1,ApplyMethod=immediate' \\",
+            "       'ParameterName=server_audit_events,ParameterValue=CONNECT,QUERY_DDL,QUERY_DML,ApplyMethod=immediate' \\",
+            "       'ParameterName=server_audit_excl_users,ParameterValue=rdsadmin,ApplyMethod=immediate'",
+            "",
+            "4. PostgreSQL logging configuration:",
+            "   aws rds modify-db-parameter-group \\",
+            "     --db-parameter-group-name postgres-audit-params \\",
+            "     --parameters \\",
+            "       'ParameterName=log_connections,ParameterValue=1,ApplyMethod=immediate' \\",
+            "       'ParameterName=log_disconnections,ParameterValue=1,ApplyMethod=immediate' \\",
+            "       'ParameterName=log_statement,ParameterValue=ddl,ApplyMethod=immediate' \\",
+            "       'ParameterName=log_min_duration_statement,ParameterValue=1000,ApplyMethod=immediate'",
+            "",
+            "5. Associer parameter group à DB:",
+            "   aws rds modify-db-instance \\",
+            "     --db-instance-identifier mydb \\",
+            "     --db-parameter-group-name mysql-audit-params \\",
+            "     --apply-immediately",
+            "",
+            "6. Activer CloudWatch Logs publishing:",
+            "   # MySQL:",
+            "   aws rds modify-db-instance \\",
+            "     --db-instance-identifier mydb \\",
+            "     --cloudwatch-logs-export-configuration '{",
+            '       "LogTypesToEnable": ["error", "general", "slowquery", "audit"]',
+            "     }'",
+            "",
+            "   # PostgreSQL:",
+            "   aws rds modify-db-instance \\",
+            "     --db-instance-identifier mydb \\",
+            "     --cloudwatch-logs-export-configuration '{",
+            '       "LogTypesToEnable": ["postgresql"]',
+            "     }'",
+            "",
+            "   # Aurora:",
+            "   aws rds modify-db-cluster \\",
+            "     --db-cluster-identifier mycluster \\",
+            "     --cloudwatch-logs-export-configuration '{",
+            '       "LogTypesToEnable": ["audit", "error", "general", "slowquery"]',
+            "     }'",
+            "",
+            "7. Configurer CloudWatch Logs retention:",
+            "   aws logs put-retention-policy \\",
+            "     --log-group-name /aws/rds/instance/mydb/audit \\",
+            "     --retention-in-days 90",
+            "",
+            "8. Créer metric filter pour failed logins:",
+            "   aws logs put-metric-filter \\",
+            "     --log-group-name /aws/rds/instance/mydb/audit \\",
+            "     --filter-name FailedLogins \\",
+            "     --filter-pattern '[time, thread, type=FAILED_CONNECT*, ...]' \\",
+            "     --metric-transformations \\",
+            "       'metricName=FailedLoginAttempts,metricNamespace=RDS/Security,metricValue=1'",
+            "",
+            "9. Créer CloudWatch Alarm sur failed logins:",
+            "   aws cloudwatch put-metric-alarm \\",
+            "     --alarm-name rds-failed-logins \\",
+            "     --metric-name FailedLoginAttempts \\",
+            "     --namespace RDS/Security \\",
+            "     --statistic Sum \\",
+            "     --period 300 \\",
+            "     --evaluation-periods 1 \\",
+            "     --threshold 5 \\",
+            "     --comparison-operator GreaterThanThreshold \\",
+            "     --alarm-actions arn:aws:sns:region:account:security-alerts",
+            "",
+            "10. Metric filter pour DDL changes:",
+            "    aws logs put-metric-filter \\",
+            "      --log-group-name /aws/rds/instance/mydb/audit \\",
+            "      --filter-name DDLChanges \\",
+            "      --filter-pattern '[..., query=*DROP* || query=*ALTER* || query=*CREATE*]' \\",
+            "      --metric-transformations \\",
+            "        'metricName=DDLOperations,metricNamespace=RDS/Security,metricValue=1'",
+            "",
+            "11. Export vers S3 pour archivage long-term:",
+            "    aws logs create-export-task \\",
+            "      --log-group-name /aws/rds/instance/mydb/audit \\",
+            "      --from $(date -d '30 days ago' +%s)000 \\",
+            "      --to $(date +%s)000 \\",
+            "      --destination rds-audit-logs-archive \\",
+            "      --destination-prefix rds/mydb/audit/",
+            "",
+            "12. Analyse avec CloudWatch Logs Insights:",
+            "    # Top 10 users par nombre de queries:",
+            "    fields @timestamp, user, query",
+            "    | stats count() by user",
+            "    | sort count desc",
+            "    | limit 10"
+        ],
+        verification_steps=[
+            "Vérifier parameter group logging config:",
+            "  aws rds describe-db-parameters \\",
+            "    --db-parameter-group-name mysql-audit-params \\",
+            "    --query 'Parameters[?ParameterName==`slow_query_log` || ParameterName==`general_log` || ParameterName==`server_audit_logging`]'",
+            "",
+            "Vérifier CloudWatch Logs enabled:",
+            "  aws rds describe-db-instances --db-instance-identifier mydb \\",
+            "    --query 'DBInstances[0].EnabledCloudwatchLogsExports'",
+            "  # Expected: [\"error\", \"slowquery\", \"audit\"]",
+            "",
+            "Lister DB instances sans audit logging:",
+            "  aws rds describe-db-instances \\",
+            "    --query 'DBInstances[?!EnabledCloudwatchLogsExports || length(EnabledCloudwatchLogsExports)==`0`].[DBInstanceIdentifier]'",
+            "",
+            "Vérifier log groups créés:",
+            "  aws logs describe-log-groups --log-group-name-prefix /aws/rds/",
+            "",
+            "Consulter recent audit logs:",
+            "  aws logs tail /aws/rds/instance/mydb/audit --follow --since 10m",
+            "",
+            "CloudWatch Logs Insights - failed login attempts:",
+            "  Query:",
+            "  fields @timestamp, @message",
+            "  | filter @message like /FAILED_CONNECT/",
+            "  | stats count() by bin(5m)",
+            "",
+            "CloudWatch Logs Insights - DDL operations:",
+            "  Query:",
+            "  fields @timestamp, user, query",
+            "  | filter query like /DROP|ALTER|CREATE/",
+            "  | sort @timestamp desc",
+            "",
+            "Vérifier retention policy:",
+            "  aws logs describe-log-groups \\",
+            "    --log-group-name-prefix /aws/rds/ \\",
+            "    --query 'logGroups[].[logGroupName,retentionInDays]'",
+            "",
+            "Vérifier metric filters configurés:",
+            "  aws logs describe-metric-filters \\",
+            "    --log-group-name /aws/rds/instance/mydb/audit",
+            "",
+            "Vérifier alarmes actives:",
+            "  aws cloudwatch describe-alarms --alarm-name-prefix rds-",
+            "",
+            "Test: déclencher failed login et vérifier log:",
+            "  mysql -h mydb.region.rds.amazonaws.com -u wronguser -p",
+            "  # Puis vérifier dans CloudWatch Logs",
+            "",
+            "Performance impact check:",
+            "  # Comparer CPU/IOPS avant et après activation general log",
+            "  # General log peut ajouter 10-30% overhead CPU"
+        ],
+        references=[
+            "https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_LogAccess.html",
+            "https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/AuroraMySQL.Auditing.html",
+            "https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_LogAccess.Procedural.UploadtoCloudWatch.html",
+            "https://aws.amazon.com/blogs/database/auditing-an-amazon-aurora-cluster/"
+        ]
     )
 ]
 
@@ -5420,6 +6109,475 @@ LAMBDA_QUESTIONS = [
             "https://docs.aws.amazon.com/lambda/latest/dg/lambda-x-ray.html",
             "https://docs.aws.amazon.com/xray/latest/devguide/xray-sdk-python.html"
         ]
+    ),
+
+    Question(
+        id="LAMBDA-006",
+        question="Lambda Function URLs: access control IAM/CORS configuré et HTTPS obligatoire, pas d'exposition publique non sécurisée?",
+        description="Vérifier que les Function URLs Lambda sont sécurisées avec IAM auth ou authz appropriée, CORS configuré strictement, et pas d'accès public non intentionnel",
+        severity="HIGH",
+        category="Lambda",
+        compliance=["Zero Trust", "AWS Well-Architected", "Least Privilege"],
+        technical_details="""
+        Lambda Function URLs = HTTP(S) endpoint natif pour Lambda
+
+        Avantages Function URLs:
+        - Pas besoin d'API Gateway pour simple HTTP
+        - Coût réduit (pas de API Gateway charges)
+        - Latence réduite (direct invoke)
+        - Setup simple (1 commande)
+        - Intégration streaming response
+
+        Auth types:
+        1. AWS_IAM:
+           - Signature SigV4 requise
+           - Caller doit avoir IAM permission lambda:InvokeFunctionUrl
+           - Secure, granular control
+           - Pour internal services
+
+        2. NONE:
+           - Aucune authentication
+           - Public Internet access
+           - DANGEREUX si pas intentionnel
+           - Pour webhooks, public APIs, CDN origin
+
+        Différence vs API Gateway:
+        | Feature              | Function URL | API Gateway |
+        |----------------------|--------------|-------------|
+        | Auth                 | IAM or None  | IAM, Cognito, Lambda auth, API keys |
+        | WAF                  | ❌           | ✅          |
+        | Rate limiting        | ❌           | ✅          |
+        | Request validation   | ❌           | ✅          |
+        | Caching              | ❌           | ✅          |
+        | Custom domains       | ❌ (CloudFront) | ✅       |
+        | Cost                 | $0           | $3.50/M req |
+        | Use case             | Simple, internal | Production APIs |
+
+        CORS configuration:
+        - Permet browser requests cross-origin
+        - AllowOrigins: specific domains (pas "*" en prod)
+        - AllowMethods: GET, POST, etc.
+        - AllowHeaders: custom headers autorisés
+        - ExposeHeaders: headers exposés au client
+        - MaxAge: cache preflight requests
+        - AllowCredentials: cookies/auth headers
+
+        Security best practices:
+        - Utiliser AWS_IAM auth par défaut
+        - NONE auth seulement si vraiment public
+        - CORS: restrictif AllowOrigins (pas *)
+        - CloudFront devant si NONE auth (WAF, DDoS)
+        - API Gateway si besoin WAF/rate limiting
+        - Secrets dans environment variables (encrypted)
+        - Input validation dans function code
+
+        Monitoring:
+        - CloudWatch Logs: tous invocations
+        - CloudWatch Metrics: InvocationCount, Errors
+        - VPC Flow Logs: si function in VPC
+        - CloudTrail: CreateFunctionUrlConfig, UpdateFunctionUrlConfig
+
+        Use cases Function URL:
+        ✅ Webhooks (GitHub, Stripe, etc.)
+        ✅ Internal microservices communication
+        ✅ CDN origin (CloudFront → Lambda)
+        ✅ Simple prototypes/testing
+        ❌ Production customer-facing API (use API Gateway)
+        ❌ Besoin WAF/DDoS protection
+        ❌ Complex auth/authz logic
+        """,
+        remediation=[
+            "1. Créer Function URL avec IAM auth (secure):",
+            "   aws lambda create-function-url-config \\",
+            "     --function-name myfunction \\",
+            "     --auth-type AWS_IAM \\",
+            "     --cors '{",
+            '       "AllowOrigins": ["https://myapp.example.com"],',
+            '       "AllowMethods": ["GET", "POST"],',
+            '       "AllowHeaders": ["Content-Type", "X-Api-Key"],',
+            '       "ExposeHeaders": ["X-Request-Id"],',
+            '       "MaxAge": 300,',
+            '       "AllowCredentials": true',
+            "     }'",
+            "",
+            "2. Ajouter IAM policy pour autoriser invocation:",
+            "   # Permet specific IAM role/user:",
+            "   aws lambda add-permission \\",
+            "     --function-name myfunction \\",
+            "     --statement-id AllowInvokeFromRole \\",
+            "     --action lambda:InvokeFunctionUrl \\",
+            "     --principal arn:aws:iam::account:role/MyAppRole",
+            "",
+            "3. Créer Function URL NONE auth (PUBLIC - use with caution):",
+            "   aws lambda create-function-url-config \\",
+            "     --function-name webhook-handler \\",
+            "     --auth-type NONE \\",
+            "     --cors '{",
+            '       "AllowOrigins": ["*"],',  # Public webhook",
+            '       "AllowMethods": ["POST"],',
+            '       "MaxAge": 86400',
+            "     }'",
+            "",
+            "   # Ajouter resource-based policy pour public access:",
+            "   aws lambda add-permission \\",
+            "     --function-name webhook-handler \\",
+            "     --statement-id FunctionURLAllowPublicAccess \\",
+            "     --action lambda:InvokeFunctionUrl \\",
+            "     --principal '*' \\",
+            "     --function-url-auth-type NONE",
+            "",
+            "4. Obtenir Function URL:",
+            "   aws lambda get-function-url-config \\",
+            "     --function-name myfunction \\",
+            "     --query 'FunctionUrl' \\",
+            "     --output text",
+            "",
+            "5. Tester invocation avec IAM auth (Python):",
+            "   import boto3",
+            "   from botocore.auth import SigV4Auth",
+            "   from botocore.awsrequest import AWSRequest",
+            "   import requests",
+            "",
+            "   session = boto3.Session()",
+            "   credentials = session.get_credentials()",
+            "",
+            "   url = 'https://abc123.lambda-url.us-east-1.on.aws/'",
+            "   request = AWSRequest(method='GET', url=url)",
+            "   SigV4Auth(credentials, 'lambda', 'us-east-1').add_auth(request)",
+            "",
+            "   response = requests.get(url, headers=dict(request.headers))",
+            "",
+            "6. Mettre CloudFront devant Function URL (WAF, caching):",
+            "   aws cloudfront create-distribution \\",
+            "     --origin-domain-name abc123.lambda-url.us-east-1.on.aws \\",
+            "     --default-root-object '' \\",
+            "     --web-acl-id <waf-acl-id>",
+            "",
+            "7. Audit Function URLs avec NONE auth:",
+            "   for func in $(aws lambda list-functions --query 'Functions[].FunctionName' --output text); do",
+            "     auth=$(aws lambda get-function-url-config --function-name $func 2>/dev/null | jq -r '.AuthType')",
+            "     [ \"$auth\" = \"NONE\" ] && echo \"PUBLIC: $func\"",
+            "   done",
+            "",
+            "8. Désactiver Function URL:",
+            "   aws lambda delete-function-url-config --function-name myfunction",
+            "",
+            "9. Update CORS config:",
+            "   aws lambda update-function-url-config \\",
+            "     --function-name myfunction \\",
+            "     --cors '{",
+            '       "AllowOrigins": ["https://app.example.com", "https://admin.example.com"],',
+            '       "AllowMethods": ["GET", "POST", "PUT"],',
+            '       "AllowHeaders": ["Content-Type", "Authorization"],',
+            '       "MaxAge": 600',
+            "     }'",
+            "",
+            "10. Function code input validation (defense in depth):",
+            "    def lambda_handler(event, context):",
+            "        # Validate request",
+            "        if event.get('requestContext', {}).get('http', {}).get('method') not in ['GET', 'POST']:",
+            "            return {'statusCode': 405, 'body': 'Method Not Allowed'}",
+            "        ",
+            "        # Validate headers",
+            "        headers = event.get('headers', {})",
+            "        if 'x-api-key' not in headers:",
+            "            return {'statusCode': 401, 'body': 'Unauthorized'}",
+            "        ",
+            "        # Your logic here"
+        ],
+        verification_steps=[
+            "Lister toutes Function URLs:",
+            "  for func in $(aws lambda list-functions --query 'Functions[].FunctionName' --output text); do",
+            "    aws lambda get-function-url-config --function-name $func 2>/dev/null",
+            "  done",
+            "",
+            "Identifier Function URLs avec NONE auth (public):",
+            "  for func in $(aws lambda list-functions --query 'Functions[].FunctionName' --output text); do",
+            "    config=$(aws lambda get-function-url-config --function-name $func 2>/dev/null)",
+            "    auth=$(echo $config | jq -r '.AuthType')",
+            "    [ \"$auth\" = \"NONE\" ] && echo \"$func: PUBLIC ACCESS\"",
+            "  done",
+            "",
+            "Vérifier CORS config:",
+            "  aws lambda get-function-url-config --function-name myfunction | jq '.Cors'",
+            "",
+            "Test IAM auth Function URL (avec credentials):",
+            "  # Doit retourner 200 avec valid SigV4:",
+            "  aws lambda invoke-url \\",
+            "    --function-url https://abc123.lambda-url.us-east-1.on.aws/ \\",
+            "    output.json",
+            "",
+            "Test NONE auth Function URL (sans credentials):",
+            "  curl https://abc123.lambda-url.us-east-1.on.aws/",
+            "  # Devrait fonctionner si AuthType=NONE",
+            "",
+            "Vérifier permissions resource-based:",
+            "  aws lambda get-policy --function-name myfunction | jq '.Policy | fromjson'",
+            "",
+            "CloudWatch Logs - voir invocations:",
+            "  aws logs tail /aws/lambda/myfunction --follow",
+            "",
+            "CloudWatch Metrics - invocation count:",
+            "  aws cloudwatch get-metric-statistics \\",
+            "    --namespace AWS/Lambda \\",
+            "    --metric-name Invocations \\",
+            "    --dimensions Name=FunctionName,Value=myfunction \\",
+            "    --start-time $(date -u -d '1 hour ago' +%s) \\",
+            "    --end-time $(date -u +%s) \\",
+            "    --period 300 \\",
+            "    --statistics Sum",
+            "",
+            "CloudTrail audit - creation/modification Function URL:",
+            "  aws cloudtrail lookup-events \\",
+            "    --lookup-attributes AttributeKey=EventName,AttributeValue=CreateFunctionUrlConfig \\",
+            "    --max-results 50",
+            "",
+            "Test CORS preflight:",
+            "  curl -X OPTIONS https://abc123.lambda-url.us-east-1.on.aws/ \\",
+            "    -H 'Origin: https://myapp.example.com' \\",
+            "    -H 'Access-Control-Request-Method: POST' \\",
+            "    -v",
+            "  # Check Access-Control-Allow-Origin header in response"
+        ],
+        references=[
+            "https://docs.aws.amazon.com/lambda/latest/dg/lambda-urls.html",
+            "https://docs.aws.amazon.com/lambda/latest/dg/urls-auth.html",
+            "https://docs.aws.amazon.com/lambda/latest/dg/urls-configuration.html"
+        ]
+    ),
+
+    Question(
+        id="LAMBDA-007",
+        question="Lambda Layers: dépendances sécurisées, versioning strict, et pas de secrets dans layers?",
+        description="Vérifier que Lambda Layers contiennent uniquement dépendances sécurisées et à jour, avec versioning approprié, et que secrets ne sont jamais stockés dans layers",
+        severity="MEDIUM",
+        category="Lambda",
+        compliance=["AWS Well-Architected", "Supply Chain Security"],
+        technical_details="""
+        Lambda Layers = packages réutilisables entre functions
+
+        Use cases Layers:
+        - Dépendances communes (libraries, SDKs)
+        - Runtime custom (ex: Python 3.11 avec patches)
+        - Configuration partagée (pas secrets!)
+        - Tools communs (monitoring agents)
+        - Frameworks (ex: boto3 upgraded version)
+
+        Structure Layer:
+        - /opt/python/ → Python libraries
+        - /opt/nodejs/ → Node.js modules
+        - /opt/bin/ → Executables
+        - /opt/lib/ → Shared libraries
+        - Max 5 layers par function
+        - Max 250 MB unzipped (all layers + function)
+
+        Security concerns:
+        1. Vulnerable dependencies:
+           - Outdated libraries avec CVEs
+           - Malicious packages (supply chain attack)
+           - Unverified sources
+
+        2. Secrets exposure:
+           - API keys, passwords dans layer
+           - Layer = immutable, shareable
+           - Rotation impossible si secrets dans layer
+           - Use Secrets Manager/Parameter Store instead
+
+        3. Excessive permissions:
+           - Layer partagé entre many functions
+           - Over-privileged functions héritent risk
+           - Principle of least privilege
+
+        4. Version management:
+           - Old layer versions orphaned
+           - Incompatibilité version conflicts
+           - Breaking changes sans notice
+
+        Versioning strategy:
+        - Semantic versioning: layer-name-v1, v2, v3
+        - Immutable: jamais modifier layer existante
+        - Publish new version pour updates
+        - Delete old versions (après migration functions)
+        - $LATEST = current, mais prefer explicit versions
+
+        Layer sharing:
+        - Private: account-only (défaut)
+        - Cross-account: via layer permissions
+        - Public: everyone (AWS Serverless Application Repo)
+        - AWS-provided layers: disponibles publiquement
+
+        Dependency scanning:
+        - Scan vulnerabilities avec Snyk, Dependabot
+        - Check SBOM (Software Bill of Materials)
+        - Automated updates via CI/CD
+        - Pin versions exactes (pas "latest")
+
+        Best practices:
+        - Un layer = un purpose (pas monolith)
+        - Requirements.txt versionné avec layer
+        - Documentation: what's in each version
+        - Automated testing layer avec function
+        - Cleanup unused layers (cost + clutter)
+        - Never secrets (use Secrets Manager)
+        """,
+        remediation=[
+            "1. Créer Lambda Layer (Python exemple):",
+            "   # Structure locale:",
+            "   mkdir -p layer/python",
+            "   pip install requests -t layer/python/",
+            "",
+            "   # Créer ZIP:",
+            "   cd layer && zip -r ../layer.zip . && cd ..",
+            "",
+            "   # Publish layer:",
+            "   aws lambda publish-layer-version \\",
+            "     --layer-name common-dependencies \\",
+            "     --description 'requests v2.28.1' \\",
+            "     --zip-file fileb://layer.zip \\",
+            "     --compatible-runtimes python3.9 python3.10",
+            "",
+            "2. Attacher layer à function:",
+            "   aws lambda update-function-configuration \\",
+            "     --function-name myfunction \\",
+            "     --layers arn:aws:lambda:region:account:layer:common-dependencies:1",
+            "",
+            "3. Lister layers et versions:",
+            "   aws lambda list-layers",
+            "   aws lambda list-layer-versions --layer-name common-dependencies",
+            "",
+            "4. Partager layer cross-account:",
+            "   aws lambda add-layer-version-permission \\",
+            "     --layer-name common-dependencies \\",
+            "     --version-number 1 \\",
+            "     --statement-id xaccount \\",
+            "     --action lambda:GetLayerVersion \\",
+            "     --principal 123456789012  # Target account",
+            "",
+            "5. Scanner vulnerabilities dependencies (Python):",
+            "   pip install safety",
+            "   safety check --file requirements.txt",
+            "",
+            "   # Ou avec Snyk:",
+            "   snyk test --file=requirements.txt",
+            "",
+            "6. Automated layer updates (CI/CD pipeline):",
+            "   # .github/workflows/update-layer.yml",
+            "   - name: Build layer",
+            "     run: |",
+            "       pip install -r requirements.txt -t layer/python/",
+            "       cd layer && zip -r ../layer.zip .",
+            "   - name: Publish layer",
+            "     run: |",
+            "       aws lambda publish-layer-version \\",
+            "         --layer-name common-deps \\",
+            "         --zip-file fileb://layer.zip",
+            "",
+            "7. Cleanup old layer versions:",
+            "   # Lister versions:",
+            "   aws lambda list-layer-versions --layer-name common-dependencies",
+            "",
+            "   # Supprimer old version:",
+            "   aws lambda delete-layer-version \\",
+            "     --layer-name common-dependencies \\",
+            "     --version-number 1",
+            "",
+            "8. Utiliser AWS-managed layers:",
+            "   # AWS Parameters and Secrets Lambda Extension:",
+            "   arn:aws:lambda:region:account:layer:AWS-Parameters-and-Secrets-Lambda-Extension:4",
+            "",
+            "   # AWS Lambda Powertools:",
+            "   arn:aws:lambda:region:017000801446:layer:AWSLambdaPowertoolsPythonV2:21",
+            "",
+            "9. Document layer contents:",
+            "   # requirements.txt alongside layer",
+            "   requests==2.28.1",
+            "   boto3==1.26.90",
+            "   pydantic==1.10.7",
+            "",
+            "   # README.md:",
+            "   # common-dependencies layer v1",
+            "   # - requests 2.28.1: HTTP library",
+            "   # - boto3 1.26.90: AWS SDK (upgraded from runtime default)",
+            "   # - pydantic 1.10.7: Data validation",
+            "",
+            "10. Verify NO secrets in layer:",
+            "    # Before publishing, scan for secrets:",
+            "    cd layer",
+            "    git secrets --scan -r .",
+            "    trufflehog filesystem . --only-verified",
+            "",
+            "    # Never include:",
+            "    # - .env files",
+            "    # - config.json avec passwords",
+            "    # - AWS credentials",
+            "    # - API keys"
+        ],
+        verification_steps=[
+            "Lister tous les layers:",
+            "  aws lambda list-layers --query 'Layers[].[LayerName,LatestMatchingVersion.Version]'",
+            "",
+            "Lister functions utilisant un layer specific:",
+            "  for func in $(aws lambda list-functions --query 'Functions[].FunctionName' --output text); do",
+            "    layers=$(aws lambda get-function-configuration --function-name $func --query 'Layers[].Arn' --output text)",
+            "    echo \"$func: $layers\"",
+            "  done | grep common-dependencies",
+            "",
+            "Vérifier layer contents (download et inspect):",
+            "  # Get layer version ARN:",
+            "  LAYER_ARN=$(aws lambda get-layer-version --layer-name common-dependencies --version-number 1 --query 'Content.Location' --output text)",
+            "",
+            "  # Download:",
+            "  wget -O layer.zip $LAYER_ARN",
+            "",
+            "  # Extract et inspect:",
+            "  unzip layer.zip -d layer/",
+            "  ls -R layer/",
+            "",
+            "Scan vulnerabilities dans layer:",
+            "  # Extraire requirements:",
+            "  pip list --path layer/python/ > installed-packages.txt",
+            "  safety check --stdin < installed-packages.txt",
+            "",
+            "Vérifier layer permissions (qui peut utiliser):",
+            "  aws lambda get-layer-version-policy \\",
+            "    --layer-name common-dependencies \\",
+            "    --version-number 1",
+            "",
+            "Identifier orphaned layer versions (pas utilisées):",
+            "  # Lister all layers:",
+            "  aws lambda list-layers --query 'Layers[].LayerName' --output text | while read layer; do",
+            "    echo \"=== Layer: $layer ===\"",
+            "    aws lambda list-layer-versions --layer-name $layer --query 'LayerVersions[].[Version,Description]'",
+            "  done",
+            "",
+            "  # Manual review: check which versions are in use",
+            "",
+            "Vérifier size total layers + function:",
+            "  aws lambda get-function-configuration --function-name myfunction \\",
+            "    --query '[CodeSize, Layers[].CodeSize]'",
+            "  # Total doit être < 250 MB unzipped",
+            "",
+            "CloudTrail audit - layer creation/updates:",
+            "  aws cloudtrail lookup-events \\",
+            "    --lookup-attributes AttributeKey=EventName,AttributeValue=PublishLayerVersion \\",
+            "    --max-results 50",
+            "",
+            "Test function avec layer:",
+            "  aws lambda invoke \\",
+            "    --function-name myfunction \\",
+            "    --payload '{}' \\",
+            "    output.json",
+            "  cat output.json",
+            "",
+            "Vérifier runtime compatibility:",
+            "  aws lambda get-layer-version --layer-name common-dependencies --version-number 1 \\",
+            "    --query 'CompatibleRuntimes'"
+        ],
+        references=[
+            "https://docs.aws.amazon.com/lambda/latest/dg/configuration-layers.html",
+            "https://docs.aws.amazon.com/lambda/latest/dg/creating-deleting-layers.html",
+            "https://aws.amazon.com/blogs/compute/working-with-lambda-layers-and-extensions-in-container-images/"
+        ]
     )
 ]
 
@@ -5625,6 +6783,421 @@ CLOUDTRAIL_QUESTIONS = [
         references=[
             "https://docs.aws.amazon.com/awscloudtrail/latest/userguide/logging-data-events-with-cloudtrail.html",
             "https://docs.aws.amazon.com/awscloudtrail/latest/userguide/logging-insights-events-with-cloudtrail.html"
+        ]
+    ),
+
+    Question(
+        id="TRAIL-005",
+        question="CloudTrail Lake configuré pour querying SQL et analytics long-term des audit logs?",
+        description="Vérifier que CloudTrail Lake est utilisé pour retention long-term et requêtes SQL avancées sur events CloudTrail pour investigations sécurité",
+        severity="MEDIUM",
+        category="CloudTrail",
+        compliance=["Security Analytics", "Forensics", "Compliance Reporting"],
+        technical_details="""
+        CloudTrail Lake = managed data lake pour CloudTrail events
+
+        Avantages vs S3 logs traditionnels:
+        - Query SQL sans setup Athena tables
+        - Retention jusqu'à 7 ans (S3 = illimité mais coûteux)
+        - Aggregation multi-account, multi-region
+        - Performance optimisée pour analytics
+        - Immutable storage avec AWS-managed encryption
+
+        Fonctionnalités:
+        - SQL queries sur billions events en secondes
+        - Aggregate events from Organizations
+        - Federated query (non-AWS sources)
+        - Event data stores: containers logiques
+        - Pricing: ingestion $2.50 per GB, queries $0.005 per GB scanned
+
+        Use cases:
+        - Security investigations (qui a fait quoi?)
+        - Compliance audits (PCI-DSS, HIPAA)
+        - Forensic analysis post-incident
+        - Cost attribution par tag
+        - Compliance reporting automatisé
+
+        Retention tiers:
+        - 7 days: gratuit (via CloudTrail standard)
+        - 90 days: typical compliance
+        - 1 year: extended retention
+        - 7 years: regulatory requirements (financial)
+
+        Exemple queries:
+        - Tous IAM policy changes derniers 30j
+        - Failed login attempts par user
+        - S3 DeleteObject events
+        - EC2 RunInstances sans encryption
+        - Root account usage
+
+        Différence vs Athena:
+        - Lake: fully managed, no table creation
+        - Athena: DIY, mais flexible pour custom data
+        - Lake: optimized for audit logs
+        - Athena: general-purpose analytics
+
+        Intégration:
+        - CloudTrail → Lake (auto-ingestion)
+        - Organizations: aggregate tous accounts
+        - QuickSight: dashboards
+        - EventBridge: alertes sur query results
+        """,
+        remediation=[
+            "1. Créer CloudTrail Lake event data store:",
+            "   aws cloudtrail create-event-data-store \\",
+            "     --name security-audit-lake \\",
+            "     --retention-period 365 \\",  # 365 days = 1 year",
+            "     --multi-region-enabled \\",
+            "     --organization-enabled \\",  # Aggregate all accounts",
+            "     --advanced-event-selectors file://selectors.json",
+            "",
+            "   selectors.json (all management + data events):",
+            "   [{",
+            '     "Name": "All management events",',
+            '     "FieldSelectors": [{',
+            '       "Field": "eventCategory",',
+            '       "Equals": ["Management"]',
+            "     }]",
+            "   },",
+            "   {",
+            '     "Name": "S3 data events",',
+            '     "FieldSelectors": [{',
+            '       "Field": "resources.type",',
+            '       "Equals": ["AWS::S3::Object"]',
+            "     }]",
+            "   }]",
+            "",
+            "2. Enable ingestion depuis CloudTrail trail:",
+            "   # CloudTrail Lake auto-ingests depuis trails actifs",
+            "   # Vérifier trail existe et log vers S3:",
+            "   aws cloudtrail describe-trails",
+            "",
+            "3. Run SQL query pour security investigation:",
+            "   aws cloudtrail start-query \\",
+            "     --query-statement \"",
+            "       SELECT userIdentity.principalId, eventName, eventTime, sourceIPAddress",
+            "       FROM <event-data-store-id>",
+            "       WHERE eventName = 'DeleteBucket'",
+            "         AND eventTime > '2024-01-01 00:00:00'",
+            "       ORDER BY eventTime DESC",
+            "     \"",
+            "",
+            "4. Query IAM policy changes:",
+            "   aws cloudtrail start-query \\",
+            "     --query-statement \"",
+            "       SELECT eventTime, userIdentity.principalId, eventName, requestParameters",
+            "       FROM <event-data-store-id>",
+            "       WHERE eventName IN ('PutUserPolicy', 'AttachUserPolicy', 'PutRolePolicy', 'AttachRolePolicy')",
+            "         AND eventTime > CURRENT_TIMESTAMP - INTERVAL '30' DAY",
+            "       ORDER BY eventTime DESC",
+            "     \"",
+            "",
+            "5. Query failed authentication attempts:",
+            "   aws cloudtrail start-query \\",
+            "     --query-statement \"",
+            "       SELECT eventTime, userIdentity.principalId, sourceIPAddress, errorCode, errorMessage",
+            "       FROM <event-data-store-id>",
+            "       WHERE errorCode IN ('AccessDenied', 'UnauthorizedOperation', 'InvalidClientTokenId')",
+            "         AND eventTime > CURRENT_TIMESTAMP - INTERVAL '7' DAY",
+            "       GROUP BY sourceIPAddress",
+            "       HAVING COUNT(*) > 10",
+            "       ORDER BY COUNT(*) DESC",
+            "     \"",
+            "",
+            "6. Obtenir résultats query:",
+            "   # Get query ID from start-query response",
+            "   aws cloudtrail get-query-results --query-id <query-id>",
+            "",
+            "7. Créer saved query pour réutilisation:",
+            "   # Via console CloudTrail Lake → Saved queries",
+            "   # Ou garder SQL dans repository Git",
+            "",
+            "8. Configurer retention appropriée:",
+            "   aws cloudtrail update-event-data-store \\",
+            "     --event-data-store <id> \\",
+            "     --retention-period 2555  # 7 years",
+            "",
+            "9. Monitor coûts ingestion/queries:",
+            "   # CloudWatch metrics:",
+            "   # - IngestedBytes",
+            "   # - QueriedBytes",
+            "   # Cost Explorer tag CloudTrail Lake resources",
+            "",
+            "10. Federated query (optionnel - non-AWS sources):",
+            "    # Intégrer logs non-AWS (on-prem, third-party):",
+            "    aws cloudtrail put-resource-policy --resource-arn <data-store-arn> --resource-policy file://policy.json"
+        ],
+        verification_steps=[
+            "Lister event data stores:",
+            "  aws cloudtrail list-event-data-stores",
+            "",
+            "Vérifier configuration data store:",
+            "  aws cloudtrail get-event-data-store --event-data-store <id> \\",
+            "    --query '{Name:Name,Retention:RetentionPeriod,MultiRegion:MultiRegionEnabled,OrgEnabled:OrganizationEnabled}'",
+            "",
+            "Lister queries récentes:",
+            "  aws cloudtrail list-queries --event-data-store <id>",
+            "",
+            "Test query - count events par service:",
+            "  aws cloudtrail start-query --query-statement \"",
+            "    SELECT eventSource, COUNT(*) as event_count",
+            "    FROM <event-data-store-id>",
+            "    WHERE eventTime > CURRENT_TIMESTAMP - INTERVAL '1' DAY",
+            "    GROUP BY eventSource",
+            "    ORDER BY event_count DESC",
+            "    LIMIT 10",
+            "  \"",
+            "",
+            "Vérifier ingestion active:",
+            "  # CloudWatch metric: IngestedBytes",
+            "  aws cloudwatch get-metric-statistics \\",
+            "    --namespace AWS/CloudTrail \\",
+            "    --metric-name IngestedBytes \\",
+            "    --dimensions Name=EventDataStore,Value=<id> \\",
+            "    --start-time $(date -u -d '1 day ago' +%s) \\",
+            "    --end-time $(date -u +%s) \\",
+            "    --period 3600 \\",
+            "    --statistics Sum",
+            "",
+            "Test forensic query - root usage:",
+            "  aws cloudtrail start-query --query-statement \"",
+            "    SELECT eventTime, eventName, sourceIPAddress",
+            "    FROM <event-data-store-id>",
+            "    WHERE userIdentity.type = 'Root'",
+            "      AND eventTime > CURRENT_TIMESTAMP - INTERVAL '90' DAY",
+            "    ORDER BY eventTime DESC",
+            "  \"",
+            "",
+            "Vérifier coûts queries:",
+            "  aws ce get-cost-and-usage \\",
+            "    --time-period Start=2024-01-01,End=2024-01-31 \\",
+            "    --granularity MONTHLY \\",
+            "    --metrics UnblendedCost \\",
+            "    --filter file://cloudtrail-lake-filter.json"
+        ],
+        references=[
+            "https://docs.aws.amazon.com/awscloudtrail/latest/userguide/cloudtrail-lake.html",
+            "https://docs.aws.amazon.com/awscloudtrail/latest/userguide/query-event-data-store-cloudtrail.html",
+            "https://aws.amazon.com/blogs/mt/announcing-aws-cloudtrail-lake-a-managed-audit-and-security-lake/"
+        ]
+    ),
+
+    Question(
+        id="TRAIL-006",
+        question="Multi-region trail activé et log file integrity validation configurée pour protection tampering?",
+        description="Vérifier que trail capture events de toutes régions et que validation d'intégrité empêche modification malveillante des logs",
+        severity="HIGH",
+        category="CloudTrail",
+        compliance=["Audit Trail", "Forensics", "Non-Repudiation", "PCI-DSS"],
+        technical_details="""
+        Multi-region CloudTrail = single trail pour toutes régions
+
+        Avantages multi-region:
+        - Un trail → logs de toutes régions AWS
+        - Pas de gap si ressources créées dans nouvelle région
+        - Centralized logging dans un S3 bucket
+        - Simplifie gestion et coûts
+        - Compliance: preuve de logging global
+
+        Single region trail (legacy):
+        - Capture seulement events de SA région
+        - Gap si attacker utilise autre région
+        - Nécessite multiple trails (complexité)
+        - Risque: région non monitorée
+
+        Log File Integrity Validation:
+        - Signature cryptographique (SHA-256 + RSA)
+        - Digest files toutes les heures
+        - Prouve logs non altérés
+        - Forensic requirement: chain of custody
+        - Détecte tampering: modification, suppression, déplacement
+
+        Comment ça marche:
+        1. CloudTrail crée log file
+        2. Compute SHA-256 hash
+        3. Sign avec RSA private key
+        4. Publish digest file (hash + signature)
+        5. Validation: verify signature + hash match
+
+        Digest file structure:
+        - logFiles: array of log file hashes
+        - digestS3Bucket, digestS3Object: location
+        - previousDigestHashValue: chaînage
+        - digestPublicKeyFingerprint: clé publique
+
+        Use cases validation:
+        - Legal: preuve logs authentiques
+        - Forensics: chain of custody
+        - Compliance: non-repudiation (PCI-DSS, HIPAA)
+        - Incident response: identifier tampering attempts
+
+        Threat model:
+        - Attacker avec S3 access tente delete/modify logs
+        - Sans validation: pas détectable
+        - Avec validation: hash mismatch → alert
+
+        Protection layers:
+        1. S3 bucket policy: deny delete (même root)
+        2. S3 Object Lock: WORM (compliance mode)
+        3. Log file validation: cryptographic proof
+        4. CloudTrail itself logged: recursive audit
+        5. Cross-account logging: attacker no access
+
+        Global events:
+        - IAM, STS, CloudFront: générés dans us-east-1
+        - Multi-region trail capture automatiquement
+        - Single-region trail: peut manquer ces events
+        """,
+        remediation=[
+            "1. Créer multi-region trail avec validation:",
+            "   aws cloudtrail create-trail \\",
+            "     --name organization-trail \\",
+            "     --s3-bucket-name cloudtrail-logs-org \\",
+            "     --is-multi-region-trail \\",
+            "     --enable-log-file-validation \\",
+            "     --is-organization-trail  # Si AWS Organizations",
+            "",
+            "2. Start logging trail:",
+            "   aws cloudtrail start-logging --name organization-trail",
+            "",
+            "3. Vérifier trail capture global events (IAM, etc):",
+            "   aws cloudtrail get-trail --name organization-trail \\",
+            "     --query 'Trail.IncludeGlobalServiceEvents'",
+            "   # Doit être true",
+            "",
+            "4. Upgrade existing single-region trail to multi-region:",
+            "   aws cloudtrail update-trail \\",
+            "     --name existing-trail \\",
+            "     --is-multi-region-trail",
+            "",
+            "5. Enable log file validation (if not already):",
+            "   aws cloudtrail update-trail \\",
+            "     --name organization-trail \\",
+            "     --enable-log-file-validation",
+            "",
+            "6. Validate log file integrity:",
+            "   aws cloudtrail validate-logs \\",
+            "     --trail-arn arn:aws:cloudtrail:region:account:trail/organization-trail \\",
+            "     --start-time 2024-01-15T00:00:00Z \\",
+            "     --end-time 2024-01-16T00:00:00Z",
+            "",
+            "   # Output:",
+            "   # - VALID: log file unchanged",
+            "   # - INVALID: tampering detected!",
+            "   # - NOT_FOUND: log missing",
+            "",
+            "7. Automated validation script (Python):",
+            "   import boto3",
+            "   ct = boto3.client('cloudtrail')",
+            "",
+            "   response = ct.validate_logs(",
+            "     TrailARN='arn:aws:cloudtrail:...',",
+            "     StartTime=datetime(2024, 1, 15),",
+            "     EndTime=datetime(2024, 1, 16)",
+            "   )",
+            "",
+            "   for result in response['ValidationResults']:",
+            "     if result['Status'] != 'VALID':",
+            "       print(f\"ALERT: {result['S3Object']} - {result['Status']}\")",
+            "",
+            "8. S3 bucket policy - prevent log deletion:",
+            "   {",
+            '     "Version": "2012-10-17",',
+            '     "Statement": [{',
+            '       "Sid": "PreventLogDeletion",',
+            '       "Effect": "Deny",',
+            '       "Principal": "*",',
+            '       "Action": "s3:DeleteObject",',
+            '       "Resource": "arn:aws:s3:::cloudtrail-logs-org/*"',
+            "     }]",
+            "   }",
+            "",
+            "9. S3 Object Lock pour WORM (immutability):",
+            "   # Enable versioning first:",
+            "   aws s3api put-bucket-versioning --bucket cloudtrail-logs-org --versioning-configuration Status=Enabled",
+            "",
+            "   # Enable Object Lock:",
+            "   aws s3api put-object-lock-configuration \\",
+            "     --bucket cloudtrail-logs-org \\",
+            "     --object-lock-configuration '{",
+            '       "ObjectLockEnabled": "Enabled",',
+            '       "Rule": {',
+            '         "DefaultRetention": {',
+            '           "Mode": "COMPLIANCE",',
+            '           "Days": 365',
+            "         }",
+            "       }",
+            "     }'",
+            "",
+            "10. CloudWatch alarm - trail stopped:",
+            "    aws cloudwatch put-metric-alarm \\",
+            "      --alarm-name cloudtrail-stopped \\",
+            "      --metric-name IsLogging \\",
+            "      --namespace AWS/CloudTrail \\",
+            "      --statistic Average \\",
+            "      --period 300 \\",
+            "      --evaluation-periods 1 \\",
+            "      --threshold 0.5 \\",
+            "      --comparison-operator LessThanThreshold \\",
+            "      --dimensions Name=TrailName,Value=organization-trail \\",
+            "      --alarm-actions arn:aws:sns:region:account:security-alerts"
+        ],
+        verification_steps=[
+            "Vérifier trail est multi-region:",
+            "  aws cloudtrail get-trail --name organization-trail \\",
+            "    --query 'Trail.IsMultiRegionTrail'",
+            "  # Expected: true",
+            "",
+            "Vérifier log file validation activée:",
+            "  aws cloudtrail get-trail --name organization-trail \\",
+            "    --query 'Trail.LogFileValidationEnabled'",
+            "  # Expected: true",
+            "",
+            "Vérifier trail logging status:",
+            "  aws cloudtrail get-trail-status --name organization-trail \\",
+            "    --query 'IsLogging'",
+            "  # Expected: true",
+            "",
+            "Lister tous trails (audit single-region):",
+            "  aws cloudtrail describe-trails \\",
+            "    --query 'trailList[].[Name,IsMultiRegionTrail,LogFileValidationEnabled]' \\",
+            "    --output table",
+            "",
+            "Test validation integrity recent logs:",
+            "  aws cloudtrail validate-logs \\",
+            "    --trail-arn arn:aws:cloudtrail:region:account:trail/organization-trail \\",
+            "    --start-time $(date -u -d '1 day ago' +%Y-%m-%dT%H:%M:%SZ) \\",
+            "    --end-time $(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "  # All logs should be VALID",
+            "",
+            "Vérifier digest files dans S3:",
+            "  aws s3 ls s3://cloudtrail-logs-org/AWSLogs/account/CloudTrail-Digest/",
+            "  # Digest files: <trail>_<region>_CloudTrail-Digest_<date>.json.gz",
+            "",
+            "Download et inspect digest file:",
+            "  aws s3 cp s3://cloudtrail-logs-org/.../digest.json.gz .",
+            "  gunzip digest.json.gz",
+            "  cat digest.json | jq '.logFiles[] | {file: .s3Object, hash: .hashValue}'",
+            "",
+            "Vérifier S3 bucket policy deny delete:",
+            "  aws s3api get-bucket-policy --bucket cloudtrail-logs-org | jq '.Policy | fromjson'",
+            "  # Check Deny s3:DeleteObject statement",
+            "",
+            "Vérifier Object Lock configuré:",
+            "  aws s3api get-object-lock-configuration --bucket cloudtrail-logs-org",
+            "",
+            "CloudWatch alarm status:",
+            "  aws cloudwatch describe-alarms --alarm-names cloudtrail-stopped",
+            "",
+            "CloudTrail events - vérifier pas de StopLogging malveillant:",
+            "  aws cloudtrail lookup-events \\",
+            "    --lookup-attributes AttributeKey=EventName,AttributeValue=StopLogging \\",
+            "    --max-results 50"
+        ],
+        references=[
+            "https://docs.aws.amazon.com/awscloudtrail/latest/userguide/cloudtrail-log-file-validation-intro.html",
+            "https://docs.aws.amazon.com/awscloudtrail/latest/userguide/receive-cloudtrail-log-files-from-multiple-regions.html",
+            "https://docs.aws.amazon.com/awscloudtrail/latest/userguide/cloudtrail-log-file-validation-cli.html"
         ]
     )
 ]
