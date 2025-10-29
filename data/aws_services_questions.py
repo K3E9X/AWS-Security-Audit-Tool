@@ -6678,6 +6678,519 @@ APIGATEWAY_QUESTIONS = [
             "https://docs.aws.amazon.com/apigateway/latest/developerguide/api-gateway-method-request-validation.html",
             "https://docs.aws.amazon.com/apigateway/latest/developerguide/set-up-logging.html"
         ]
+    ),
+
+    Question(
+        id="APIGW-005",
+        question="AWS WAF attaché à API Gateway pour protection OWASP Top 10, DDoS, et rate-based rules?",
+        description="Vérifier que WAF WebACL est configuré sur API Gateway avec rules protégeant contre SQL injection, XSS, DDoS, et abuse via rate limiting",
+        severity="HIGH",
+        category="API Gateway",
+        compliance=["OWASP API Security Top 10", "DDoS Protection", "CIS Benchmark"],
+        technical_details="""
+        AWS WAF pour API Gateway = protection Layer 7
+
+        Menaces protégées par WAF:
+        - SQL Injection (SQLi)
+        - Cross-Site Scripting (XSS)
+        - Local File Inclusion (LFI)
+        - DDoS application layer (Layer 7)
+        - Bad bots / scrapers
+        - Geographic blocking
+        - IP reputation filtering
+        - Rate limiting (abuse prevention)
+
+        WAF Rule types:
+        1. AWS Managed Rules:
+           - Core Rule Set (CRS): OWASP Top 10
+           - Known Bad Inputs
+           - SQL Database protection
+           - Linux/Windows OS protection
+           - PHP/WordPress protection
+           - Amazon IP Reputation List
+
+        2. Rate-based rules:
+           - Limite requests per IP (ex: 2000 req/5min)
+           - Protection brute force
+           - DDoS mitigation
+
+        3. Custom rules:
+           - Geo-blocking (block/allow countries)
+           - IP blacklist/whitelist
+           - Header inspection
+           - Body size limits
+           - String matching
+
+        WAF pricing:
+        - WebACL: $5/month
+        - Rule: $1/month each
+        - Requests: $0.60 per 1M requests
+        - Managed Rules: gratuit (Core Rule Set)
+        - Rate rules: inclus
+
+        Différence API Gateway throttling vs WAF:
+        | Feature              | API Gateway Throttling | WAF Rate Rules |
+        |----------------------|------------------------|----------------|
+        | Granularité          | Account/stage-level    | Per-IP        |
+        | Protection DDoS      | ❌ (distributed IPs)   | ✅            |
+        | Block malicious IPs  | ❌                     | ✅            |
+        | OWASP protection     | ❌                     | ✅            |
+        | Cost                 | Inclus                 | +$           |
+
+        WAF Actions:
+        - Allow: pass request
+        - Block: return 403 Forbidden
+        - Count: log sans bloquer (testing mode)
+        - CAPTCHA: challenge humain
+
+        Monitoring:
+        - CloudWatch Metrics: BlockedRequests, AllowedRequests
+        - WAF Logs: vers S3, CloudWatch, Kinesis Firehose
+        - Athena queries pour analytics
+        - Security automations (Lambda auto-blocking)
+
+        Best practices:
+        - Commencer Count mode → tester → Block mode
+        - Monitoring alertes sur BlockedRequests spike
+        - Regular review WAF logs pour false positives
+        - Combine WAF + API Gateway throttling + CloudFront
+        - Use Managed Rules (updated by AWS)
+        """,
+        remediation=[
+            "1. Créer WAF WebACL pour API Gateway:",
+            "   aws wafv2 create-web-acl \\",
+            "     --name api-gateway-waf \\",
+            "     --scope REGIONAL \\",  # REGIONAL for API Gateway, CLOUDFRONT for CloudFront",
+            "     --default-action Allow={} \\",
+            "     --rules file://waf-rules.json \\",
+            "     --visibility-config '{",
+            '       "SampledRequestsEnabled": true,',
+            '       "CloudWatchMetricsEnabled": true,',
+            '       "MetricName": "APIGatewayWAF"',
+            "     }'",
+            "",
+            "2. WAF Rules configuration (waf-rules.json):",
+            "   [",
+            "     {",
+            '       "Name": "AWSManagedRulesCoreRuleSet",',
+            '       "Priority": 1,',
+            '       "Statement": {',
+            '         "ManagedRuleGroupStatement": {',
+            '           "VendorName": "AWS",',
+            '           "Name": "AWSManagedRulesCommonRuleSet"',
+            "         }",
+            "       },",
+            '       "OverrideAction": {"None": {}},',
+            '       "VisibilityConfig": {',
+            '         "SampledRequestsEnabled": true,',
+            '         "CloudWatchMetricsEnabled": true,',
+            '         "MetricName": "CoreRuleSet"',
+            "       }",
+            "     },",
+            "     {",
+            '       "Name": "RateLimitRule",',
+            '       "Priority": 2,',
+            '       "Statement": {',
+            '         "RateBasedStatement": {',
+            '           "Limit": 2000,',  # 2000 requests per 5 minutes per IP",
+            '           "AggregateKeyType": "IP"',
+            "         }",
+            "       },",
+            '       "Action": {"Block": {}},',
+            '       "VisibilityConfig": {',
+            '         "SampledRequestsEnabled": true,',
+            '         "CloudWatchMetricsEnabled": true,',
+            '         "MetricName": "RateLimit"',
+            "       }",
+            "     },",
+            "     {",
+            '       "Name": "GeoBlockingRule",',
+            '       "Priority": 3,',
+            '       "Statement": {',
+            '         "GeoMatchStatement": {',
+            '           "CountryCodes": ["CN", "RU", "KP"]',  # Example blocked countries",
+            "         }",
+            "       },",
+            '       "Action": {"Block": {}},',
+            '       "VisibilityConfig": {',
+            '         "SampledRequestsEnabled": true,',
+            '         "CloudWatchMetricsEnabled": true,',
+            '         "MetricName": "GeoBlocking"',
+            "       }",
+            "     }",
+            "   ]",
+            "",
+            "3. Attacher WebACL à API Gateway stage:",
+            "   aws wafv2 associate-web-acl \\",
+            "     --web-acl-arn arn:aws:wafv2:region:account:regional/webacl/api-gateway-waf/xxxxx \\",
+            "     --resource-arn arn:aws:apigateway:region::/restapis/API-ID/stages/prod",
+            "",
+            "4. Enable WAF logging:",
+            "   # Créer Kinesis Firehose delivery stream:",
+            "   aws firehose create-delivery-stream \\",
+            "     --delivery-stream-name aws-waf-logs-api-gateway \\",
+            "     --extended-s3-destination-configuration file://firehose-config.json",
+            "",
+            "   # Enable logging sur WebACL:",
+            "   aws wafv2 put-logging-configuration \\",
+            "     --logging-configuration '{",
+            '       "ResourceArn": "arn:aws:wafv2:region:account:regional/webacl/api-gateway-waf/xxxxx",',
+            '       "LogDestinationConfigs": ["arn:aws:firehose:region:account:deliverystream/aws-waf-logs-api-gateway"]',
+            "     }'",
+            "",
+            "5. Test rules en Count mode (avant Block):",
+            "   # Modifier rule action:",
+            "   aws wafv2 update-web-acl \\",
+            "     --id <web-acl-id> \\",
+            "     --scope REGIONAL \\",
+            "     --rules file://waf-rules-count-mode.json",
+            "",
+            "   # Count mode: log matches mais pas de block",
+            "   # Analyser logs → ajuster rules → switch Block mode",
+            "",
+            "6. Add SQL Injection protection:",
+            "   {",
+            '     "Name": "SQLiProtection",',
+            '     "Priority": 4,',
+            '     "Statement": {',
+            '       "SqliMatchStatement": {',
+            '         "FieldToMatch": {"Body": {}},',
+            '         "TextTransformations": [{',
+            '           "Priority": 0,',
+            '           "Type": "URL_DECODE"',
+            "         }]",
+            "       }",
+            "     },",
+            '     "Action": {"Block": {}}',
+            "   }",
+            "",
+            "7. CloudWatch alarm - blocked requests spike:",
+            "   aws cloudwatch put-metric-alarm \\",
+            "     --alarm-name waf-blocked-requests-high \\",
+            "     --metric-name BlockedRequests \\",
+            "     --namespace AWS/WAFV2 \\",
+            "     --statistic Sum \\",
+            "     --period 300 \\",
+            "     --evaluation-periods 2 \\",
+            "     --threshold 100 \\",
+            "     --comparison-operator GreaterThanThreshold \\",
+            "     --dimensions Name=Rule,Value=ALL Name=WebACL,Value=api-gateway-waf",
+            "",
+            "8. Analyze WAF logs avec Athena:",
+            "   # Create Athena table from WAF logs S3 bucket",
+            "   # Query top blocked IPs:",
+            "   SELECT httpRequest.clientIp, COUNT(*) as block_count",
+            "   FROM waf_logs",
+            "   WHERE action = 'BLOCK'",
+            "   GROUP BY httpRequest.clientIp",
+            "   ORDER BY block_count DESC",
+            "   LIMIT 20",
+            "",
+            "9. Automated IP blocking (Security Automations):",
+            "   # AWS WAF Security Automations solution (CloudFormation)",
+            "   # Lambda parse WAF logs → auto-add IPs to block list",
+            "   # https://aws.amazon.com/solutions/implementations/aws-waf-security-automations/"
+        ],
+        verification_steps=[
+            "Vérifier WebACL attaché à API Gateway:",
+            "  aws wafv2 list-web-acls --scope REGIONAL",
+            "",
+            "Vérifier association WebACL → API Gateway:",
+            "  aws wafv2 get-web-acl-for-resource \\",
+            "    --resource-arn arn:aws:apigateway:region::/restapis/API-ID/stages/prod",
+            "",
+            "Lister rules dans WebACL:",
+            "  aws wafv2 get-web-acl \\",
+            "    --scope REGIONAL \\",
+            "    --id <web-acl-id> \\",
+            "    --query 'WebACL.Rules[].[Name,Priority,Statement]'",
+            "",
+            "Test SQL Injection (devrait être bloqué):",
+            "  curl -X POST https://api.example.com/endpoint \\",
+            "    -d '{\"query\": \"1' OR '1'='1\"}' \\",
+            "    -H 'Content-Type: application/json'",
+            "  # Expected: 403 Forbidden",
+            "",
+            "Test rate limiting (burst requests):",
+            "  for i in {1..3000}; do",
+            "    curl https://api.example.com/endpoint &",
+            "  done",
+            "  # Après ~2000 requests: 403 Forbidden",
+            "",
+            "CloudWatch Metrics - requests blocked:",
+            "  aws cloudwatch get-metric-statistics \\",
+            "    --namespace AWS/WAFV2 \\",
+            "    --metric-name BlockedRequests \\",
+            "    --dimensions Name=WebACL,Value=api-gateway-waf Name=Rule,Value=ALL \\",
+            "    --start-time $(date -u -d '1 hour ago' +%s) \\",
+            "    --end-time $(date -u +%s) \\",
+            "    --period 300 \\",
+            "    --statistics Sum",
+            "",
+            "CloudWatch Metrics - allowed vs blocked:",
+            "  aws cloudwatch get-metric-statistics \\",
+            "    --namespace AWS/WAFV2 \\",
+            "    --metric-name AllowedRequests \\",
+            "    --dimensions Name=WebACL,Value=api-gateway-waf",
+            "",
+            "Vérifier WAF logging configuré:",
+            "  aws wafv2 get-logging-configuration \\",
+            "    --resource-arn arn:aws:wafv2:region:account:regional/webacl/api-gateway-waf/xxxxx",
+            "",
+            "Sampled blocked requests (derniers 3h):",
+            "  aws wafv2 get-sampled-requests \\",
+            "    --web-acl-arn <arn> \\",
+            "    --rule-metric-name CoreRuleSet \\",
+            "    --scope REGIONAL \\",
+            "    --time-window StartTime=$(date -u -d '3 hours ago' +%s),EndTime=$(date -u +%s) \\",
+            "    --max-items 100",
+            "",
+            "Athena query - top blocked IPs (if S3 logging enabled):",
+            "  SELECT httpRequest.clientIp, COUNT(*) as blocks",
+            "  FROM waf_logs",
+            "  WHERE action = 'BLOCK' AND timestamp > current_timestamp - interval '1' day",
+            "  GROUP BY httpRequest.clientIp",
+            "  ORDER BY blocks DESC",
+            "  LIMIT 20"
+        ],
+        references=[
+            "https://docs.aws.amazon.com/waf/latest/developerguide/waf-chapter.html",
+            "https://docs.aws.amazon.com/apigateway/latest/developerguide/apigateway-control-access-aws-waf.html",
+            "https://aws.amazon.com/blogs/security/how-to-use-aws-waf-to-block-ip-addresses-that-generate-bad-requests/"
+        ]
+    ),
+
+    Question(
+        id="APIGW-006",
+        question="API Keys management avec rotation automatique et Usage Plans configurés avec quotas/throttling par client?",
+        description="Vérifier que API keys sont rotées régulièrement, stockées sécurisement, et que Usage Plans limitent l'abus par client avec quotas et throttle limits",
+        severity="MEDIUM",
+        category="API Gateway",
+        compliance=["AWS Well-Architected", "API Security Best Practices"],
+        technical_details="""
+        API Gateway API Keys = simple auth mécanisme
+
+        Limitations API Keys:
+        - PAS un mécanisme de sécurité robuste
+        - Facile à leak (code, logs, Postman collections)
+        - Pas de fine-grained permissions
+        - Recommandé: Usage Plans / quotas, PAS auth primaire
+        - Pour auth real: IAM, Cognito, Lambda Authorizer
+
+        Usage Plans components:
+        1. Throttle limits:
+           - Rate: requests per second
+           - Burst: concurrent requests spike
+           - Per-client limits
+
+        2. Quota limits:
+           - Daily/weekly/monthly request caps
+           - Prevent abuse / runaway costs
+           - Per-API key tracking
+
+        3. API Stages:
+           - Associate plan avec specific stages
+           - Différents plans: free, basic, premium
+
+        API Key rotation:
+        - Manual: create new → distribute → delete old
+        - Automated: Lambda scheduled rotation
+        - Store dans Secrets Manager (pas hardcode)
+        - Distribute via secure channel (pas email!)
+
+        Usage Plan tiers (exemple):
+        - Free tier: 100 req/day, 1 req/sec
+        - Basic tier: 10k req/day, 10 req/sec
+        - Premium tier: 1M req/day, 100 req/sec
+
+        Monitoring:
+        - CloudWatch metrics: Count, ApiKeyCount
+        - Usage data par API key
+        - Alerts sur quota dépassé
+        - Analyze top consumers
+
+        Security best practices:
+        - API keys MUST be in header (x-api-key)
+        - Never dans URL (logged everywhere)
+        - HTTPS obligatoire (pas HTTP)
+        - Rotate régulièrement (90 days)
+        - Secrets Manager pour storage
+        - Monitor usage anomalies
+        - Combine avec WAF rate limiting
+
+        API Key vs IAM vs Cognito:
+        - API Key: usage tracking, quotas (pas auth)
+        - IAM: internal services, AWS resources
+        - Cognito: user authentication, mobile/web apps
+        - Lambda Authorizer: custom auth logic (OAuth, SAML, etc.)
+
+        Alternatives modernes:
+        - OAuth 2.0 (via Cognito)
+        - JWT tokens (via Lambda Authorizer)
+        - mTLS (mutual TLS certificates)
+        - API Gateway Custom Domain + WAF
+        """,
+        remediation=[
+            "1. Créer API key:",
+            "   aws apigateway create-api-key \\",
+            "     --name client-production-key \\",
+            "     --description 'Production API key for Client ABC' \\",
+            "     --enabled \\",
+            "     --tags Environment=production,Client=ABC",
+            "",
+            "2. Créer Usage Plan:",
+            "   aws apigateway create-usage-plan \\",
+            "     --name basic-plan \\",
+            "     --description 'Basic tier: 10k req/day, 10 req/sec' \\",
+            "     --throttle '{\"rateLimit\":10,\"burstLimit\":20}' \\",
+            "     --quota '{\"limit\":10000,\"period\":DAY}'",
+            "",
+            "3. Associer Usage Plan à API stage:",
+            "   PLAN_ID=$(aws apigateway get-usage-plans --query 'items[?name==`basic-plan`].id' --output text)",
+            "   aws apigateway create-usage-plan-key \\",
+            "     --usage-plan-id $PLAN_ID \\",
+            "     --key-type API_KEY \\",
+            "     --key-id <api-key-id>",
+            "",
+            "   aws apigateway update-usage-plan \\",
+            "     --usage-plan-id $PLAN_ID \\",
+            "     --patch-operations \\",
+            "       op=add,path=/apiStages,value=API-ID:prod",
+            "",
+            "4. Require API key sur method:",
+            "   aws apigateway update-method \\",
+            "     --rest-api-id API-ID \\",
+            "     --resource-id RESOURCE-ID \\",
+            "     --http-method GET \\",
+            "     --patch-operations op=replace,path=/apiKeyRequired,value=true",
+            "",
+            "5. Deploy API avec API key requirement:",
+            "   aws apigateway create-deployment \\",
+            "     --rest-api-id API-ID \\",
+            "     --stage-name prod",
+            "",
+            "6. Store API key dans Secrets Manager:",
+            "   API_KEY=$(aws apigateway get-api-key --api-key <id> --include-value --query 'value' --output text)",
+            "   aws secretsmanager create-secret \\",
+            "     --name client-abc-api-key \\",
+            "     --secret-string \"{\\\"api_key\\\":\\\"$API_KEY\\\"}\" \\",
+            "     --tags Key=Client,Value=ABC",
+            "",
+            "7. Automated rotation (Lambda):",
+            "   # Lambda function triggered monthly:",
+            "   import boto3",
+            "   apigw = boto3.client('apigateway')",
+            "   sm = boto3.client('secretsmanager')",
+            "",
+            "   # Create new key",
+            "   new_key = apigw.create_api_key(name='client-abc-new', enabled=True)",
+            "",
+            "   # Associate avec usage plan",
+            "   apigw.create-usage-plan-key(",
+            "     usagePlanId='plan-id',",
+            "     keyType='API_KEY',",
+            "     keyId=new_key['id']",
+            "   )",
+            "",
+            "   # Update secret",
+            "   sm.put_secret_value(",
+            "     SecretId='client-abc-api-key',",
+            "     SecretString=json.dumps({'api_key': new_key['value']})",
+            "   )",
+            "",
+            "   # Notify client (SNS, email)",
+            "",
+            "   # Delete old key (après grace period: 7 jours)",
+            "   # apigw.delete_api_key(apiKey=old_key_id)",
+            "",
+            "8. Distribuer API key sécurisément:",
+            "   # Option 1: Secrets Manager ARN (client fetch)",
+            "   # Option 2: Parameter Store SecureString",
+            "   # Option 3: Email encrypted (GPG)",
+            "   # NEVER: Plain email, Slack, hardcoded in code",
+            "",
+            "9. CloudWatch alarm - quota nearly exceeded:",
+            "   aws cloudwatch put-metric-alarm \\",
+            "     --alarm-name api-quota-80pct \\",
+            "     --metric-name Count \\",
+            "     --namespace AWS/ApiGateway \\",
+            "     --statistic Sum \\",
+            "     --period 86400 \\",  # Daily",
+            "     --evaluation-periods 1 \\",
+            "     --threshold 8000 \\",  # 80% of 10k quota",
+            "     --comparison-operator GreaterThanThreshold \\",
+            "     --dimensions Name=ApiName,Value=MyAPI",
+            "",
+            "10. Monitor usage par API key:",
+            "    aws apigateway get-usage \\",
+            "      --usage-plan-id $PLAN_ID \\",
+            "      --key-id <api-key-id> \\",
+            "      --start-date 2024-01-01 \\",
+            "      --end-date 2024-01-31"
+        ],
+        verification_steps=[
+            "Lister tous API keys:",
+            "  aws apigateway get-api-keys --include-values \\",
+            "    --query 'items[].[id,name,enabled,createdDate]' \\",
+            "    --output table",
+            "",
+            "Lister Usage Plans:",
+            "  aws apigateway get-usage-plans \\",
+            "    --query 'items[].[id,name,throttle,quota]'",
+            "",
+            "Vérifier API key associée à usage plan:",
+            "  aws apigateway get-usage-plan-keys --usage-plan-id $PLAN_ID",
+            "",
+            "Vérifier method require API key:",
+            "  aws apigateway get-method \\",
+            "    --rest-api-id API-ID \\",
+            "    --resource-id RESOURCE-ID \\",
+            "    --http-method GET \\",
+            "    --query 'apiKeyRequired'",
+            "  # Expected: true",
+            "",
+            "Test request WITH valid API key:",
+            "  curl -H 'x-api-key: YOUR_API_KEY' https://api.example.com/resource",
+            "  # Expected: 200 OK",
+            "",
+            "Test request WITHOUT API key:",
+            "  curl https://api.example.com/resource",
+            "  # Expected: 403 Forbidden {\"message\":\"Forbidden\"}",
+            "",
+            "Test quota limit:",
+            "  # Burst requests jusqu'à quota limit",
+            "  for i in {1..10100}; do",
+            "    curl -H 'x-api-key: KEY' https://api.example.com/resource",
+            "  done",
+            "  # After 10k: 429 Too Many Requests",
+            "",
+            "Vérifier API key stored dans Secrets Manager:",
+            "  aws secretsmanager list-secrets --query 'SecretList[?Tags[?Key==`Client`]].Name'",
+            "",
+            "Get usage statistics par key:",
+            "  aws apigateway get-usage \\",
+            "    --usage-plan-id $PLAN_ID \\",
+            "    --start-date $(date -d '7 days ago' +%Y-%m-%d) \\",
+            "    --end-date $(date +%Y-%m-%d)",
+            "",
+            "CloudWatch metrics - API calls per key:",
+            "  aws cloudwatch get-metric-statistics \\",
+            "    --namespace AWS/ApiGateway \\",
+            "    --metric-name Count \\",
+            "    --dimensions Name=ApiName,Value=MyAPI \\",
+            "    --start-time $(date -u -d '1 day ago' +%s) \\",
+            "    --end-time $(date -u +%s) \\",
+            "    --period 3600 \\",
+            "    --statistics Sum",
+            "",
+            "Audit old API keys (>90 days):",
+            "  aws apigateway get-api-keys --include-values | jq -r '.items[] | select(.createdDate < (now - 7776000)) | {name, id, created: .createdDate}'"
+        ],
+        references=[
+            "https://docs.aws.amazon.com/apigateway/latest/developerguide/api-gateway-api-usage-plans.html",
+            "https://docs.aws.amazon.com/apigateway/latest/developerguide/api-gateway-setup-api-key-with-console.html",
+            "https://aws.amazon.com/blogs/compute/best-practices-for-organizing-larger-serverless-applications/"
+        ]
     )
 ]
 
