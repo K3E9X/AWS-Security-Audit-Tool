@@ -404,6 +404,593 @@ IAM_QUESTIONS = [
             "https://docs.aws.amazon.com/organizations/latest/userguide/orgs_manage_policies_scps.html",
             "https://github.com/aws-samples/aws-security-reference-architecture-examples"
         ]
+    ),
+
+    Question(
+        id="IAM-008",
+        question="Compte root AWS: sécurisé avec MFA, aucune access key, usage monitoring et email dédié sécurisé?",
+        description="Vérifier que le compte root est durci: MFA hardware activé, aucune access key, usage monitored via CloudTrail, et email sécurisé avec accès restreint",
+        severity="CRITICAL",
+        category="IAM",
+        compliance=["CIS Benchmark", "PCI-DSS", "SOC2", "NIST"],
+        technical_details="""
+        Compte root = accès complet sans restriction possible
+
+        Capacités uniques du root (non délégables):
+        - Changer account settings (nom, email, password)
+        - Fermer le compte AWS
+        - Changer AWS Support plan
+        - Activer IAM user access to Billing
+        - Restaurer IAM user permissions (si tous admin lockout)
+        - S3 bucket policy avec deny explicite (root override)
+        - Enregistrer domaine Route 53 (certains TLDs)
+        - Créer CloudFront key pairs (legacy)
+        - Soumettre reverse DNS pour EC2 email
+
+        Risques majeurs root account:
+        - Pas de restrictions via IAM policies
+        - Pas de SCPs applicables
+        - Pas de permission boundaries
+        - Full access à tous les services/ressources
+        - Cible prioritaire des attaquants
+
+        Protection root account (CIS Benchmark):
+        1. Hardware MFA (YubiKey, pas virtual MFA)
+        2. Aucune access key (si existantes: supprimer)
+        3. Utilisation uniquement en break-glass scenarios
+        4. Email root avec MFA (G Suite, Office 365)
+        5. Email accessible par 2+ personnes (no single point of failure)
+        6. Pas de usage quotidien (jamais)
+        7. CloudWatch alarm sur root usage
+        8. Password complexe (>30 caractères) dans vault sécurisé
+
+        Email root best practices:
+        - Email dédié (pas personal email)
+        - Distribution list avec accès contrôlé
+        - MFA sur email account
+        - Alertes SMS/phone sur login email
+        - Separate email provider (différent de corp email)
+        - Documentation accès email en lieu sécurisé
+        """,
+        remediation=[
+            "1. Vérifier et supprimer access keys root:",
+            "   # Se connecter en root via console",
+            "   # My Security Credentials → Access keys",
+            "   # Delete toutes les access keys",
+            "   # Vérification CLI (depuis IAM user admin):",
+            "   aws iam get-account-summary | grep 'AccountAccessKeysPresent'",
+            "   # Doit être = 0",
+            "",
+            "2. Activer MFA hardware pour root:",
+            "   # Console: My Security Credentials → MFA → Activate MFA",
+            "   # Choisir: Hardware MFA device (YubiKey recommandé)",
+            "   # Enregistrer 2 MFA devices (backup)",
+            "   # Stocker backup MFA en lieu physique sécurisé (coffre)",
+            "",
+            "3. Configurer CloudWatch alarm root usage:",
+            "   aws cloudwatch put-metric-alarm \\",
+            "     --alarm-name root-account-usage \\",
+            "     --alarm-description 'Alert on root account usage' \\",
+            "     --metric-name RootAccountUsage \\",
+            "     --namespace AWS/CloudTrail \\",
+            "     --statistic Sum \\",
+            "     --period 60 \\",
+            "     --evaluation-periods 1 \\",
+            "     --threshold 1 \\",
+            "     --comparison-operator GreaterThanOrEqualToThreshold \\",
+            "     --alarm-actions arn:aws:sns:region:account:security-alerts",
+            "",
+            "   Metric filter pour CloudTrail:",
+            "   { $.userIdentity.type = \"Root\" && $.userIdentity.invokedBy NOT EXISTS && $.eventType != \"AwsServiceEvent\" }",
+            "",
+            "4. Sécuriser email root:",
+            "   # Changer vers email dédié (si personnel):",
+            "   # Console root → My Account → Contact Information",
+            "   # Utiliser: aws-root@company.com (distribution list)",
+            "   # Activer MFA sur email provider",
+            "   # Limiter accès email à 2-3 personnes (CISO, VP Eng, etc.)",
+            "   # Documenter procédure accès email dans runbook",
+            "",
+            "5. Créer AWS Config rule root compliance:",
+            "   aws configservice put-config-rule \\",
+            "     --config-rule file://root-account-rule.json",
+            "",
+            "   root-account-rule.json:",
+            "   {",
+            '     "ConfigRuleName": "root-account-mfa-enabled",',
+            '     "Source": {',
+            '       "Owner": "AWS",',
+            '       "SourceIdentifier": "ROOT_ACCOUNT_MFA_ENABLED"',
+            "     }",
+            "   }",
+            "",
+            "6. Documenter break-glass procedure:",
+            "   Créer runbook avec:",
+            "   - Quand utiliser root (liste exhaustive scenarios)",
+            "   - Comment accéder email root",
+            "   - Où trouver password root (password manager)",
+            "   - Où trouver MFA device backup",
+            "   - Process approbation (2-person rule)",
+            "   - Post-usage audit review",
+            "",
+            "7. Alternate contacts configuration:",
+            "   Console → My Account → Alternate Contacts",
+            "   Configurer: Billing, Operations, Security contacts",
+            "   Utiliser distribution lists (pas individual emails)",
+            "",
+            "8. Implémenter rotation password root annuelle:",
+            "   Calendrier: changer password root tous les 365 jours",
+            "   Stocker dans password manager enterprise (1Password, LastPass)"
+        ],
+        verification_steps=[
+            "Vérifier absence access keys root:",
+            "  aws iam get-account-summary --query 'SummaryMap.AccountAccessKeysPresent'",
+            "  # Expected: 0",
+            "",
+            "Vérifier MFA root via Credential Report:",
+            "  aws iam generate-credential-report",
+            "  aws iam get-credential-report --output text | base64 -d | grep '<root_account>'",
+            "  # Colonne mfa_active doit être 'true'",
+            "",
+            "Audit usage root dans CloudTrail (90 derniers jours):",
+            "  aws cloudtrail lookup-events \\",
+            "    --lookup-attributes AttributeKey=Username,AttributeValue=root \\",
+            "    --start-time $(date -d '90 days ago' +%s) \\",
+            "    --max-results 50",
+            "  # Devrait être vide ou quasi-vide",
+            "",
+            "Vérifier CloudWatch alarm configurée:",
+            "  aws cloudwatch describe-alarms --alarm-names root-account-usage",
+            "",
+            "Config rule compliance:",
+            "  aws configservice describe-compliance-by-config-rule \\",
+            "    --config-rule-names root-account-mfa-enabled",
+            "",
+            "SecurityHub finding check:",
+            "  aws securityhub get-findings \\",
+            "    --filters '{\"GeneratorId\":[{\"Value\":\"arn:aws:securityhub:::ruleset/cis-aws-foundations-benchmark/v/1.4.0/rule/1.4\",\"Comparison\":\"EQUALS\"}]}'",
+            "  # CIS 1.4: Ensure no root user access key exists",
+            "",
+            "Vérifier alternate contacts configurés:",
+            "  aws account get-alternate-contact --alternate-contact-type SECURITY",
+            "  aws account get-alternate-contact --alternate-contact-type BILLING",
+            "  aws account get-alternate-contact --alternate-contact-type OPERATIONS"
+        ],
+        references=[
+            "https://docs.aws.amazon.com/IAM/latest/UserGuide/id_root-user.html",
+            "https://docs.aws.amazon.com/IAM/latest/UserGuide/best-practices.html#lock-away-credentials",
+            "https://docs.aws.amazon.com/securityhub/latest/userguide/securityhub-cis-controls.html"
+        ]
+    ),
+
+    Question(
+        id="IAM-009",
+        question="IAM Groups utilisés pour gestion permissions: aucune policy attachée directement aux users?",
+        description="Vérifier que toutes les permissions sont gérées via IAM Groups et qu'aucun user n'a de policy attachée directement (inline ou managed)",
+        severity="HIGH",
+        category="IAM",
+        compliance=["CIS Benchmark", "AWS Well-Architected", "Least Privilege"],
+        technical_details="""
+        Problèmes permissions directes sur users:
+        - Gestion décentralisée difficile à auditer
+        - Pas de cohérence entre users similaires
+        - Difficile de voir "qui a quoi" globalement
+        - Risque de drift: permissions divergent over time
+        - Onboarding/offboarding complexe
+        - Pas de principe de rôles (role-based access)
+
+        Avantages IAM Groups:
+        - Gestion centralisée des permissions
+        - Cohérence: tous membres groupe = mêmes permissions
+        - Audit simplifié: review group memberships
+        - Onboarding rapide: ajouter user à groups appropriés
+        - Offboarding sécurisé: remove user from groups
+        - Évolutif: modifications propagées automatiquement
+        - Aligné avec org structure (Dev, Ops, Security, etc.)
+
+        Structure recommandée:
+        Groups par fonction:
+        - Developers: read/write sur dev resources
+        - Operators: admin EC2, RDS, mais pas IAM
+        - SecurityAuditors: read-only sur tous services
+        - Billing: accès Billing console
+        - NetworkAdmins: VPC, Route53, CloudFront admin
+
+        Groups par environnement:
+        - Production-ReadOnly
+        - Production-Admin (très restreint)
+        - Staging-Admin
+        - Development-Admin
+
+        Best practices:
+        - Un user peut appartenir à plusieurs groups (intersection permissions)
+        - Préférer managed policies sur groups (vs inline)
+        - Naming convention: <Environment>-<Function>-Group
+        - Documentation obligatoire par group (README)
+        - Review régulier des memberships (quarterly)
+        - Automated alerts: user ajouté à sensitive group
+
+        Anti-patterns à éviter:
+        - User avec inline policy (jamais)
+        - User avec managed policy directement (jamais)
+        - Group vide (cleanup nécessaire)
+        - Group avec un seul member (créer policy user direct?)
+        - Group overlap 100% (merger groups)
+        """,
+        remediation=[
+            "1. Audit users avec policies directes:",
+            "   # Lister tous les users:",
+            "   aws iam list-users --query 'Users[].UserName' --output text",
+            "",
+            "   # Pour chaque user, check inline policies:",
+            "   for user in $(aws iam list-users --query 'Users[].UserName' --output text); do",
+            "     echo \"=== User: $user ===\"",
+            "     aws iam list-user-policies --user-name $user",
+            "     aws iam list-attached-user-policies --user-name $user",
+            "   done",
+            "",
+            "2. Identifier users avec permissions directes:",
+            "   # Script pour report complet:",
+            "   aws iam list-users | jq -r '.Users[].UserName' | while read user; do",
+            "     inline=$(aws iam list-user-policies --user-name $user --query 'PolicyNames' --output text)",
+            "     attached=$(aws iam list-attached-user-policies --user-name $user --query 'AttachedPolicies[].PolicyName' --output text)",
+            "     if [ -n \"$inline\" ] || [ -n \"$attached\" ]; then",
+            "       echo \"$user: inline=[$inline] attached=[$attached]\"",
+            "     fi",
+            "   done",
+            "",
+            "3. Créer IAM Groups par fonction:",
+            "   aws iam create-group --group-name Developers",
+            "   aws iam create-group --group-name Operators",
+            "   aws iam create-group --group-name SecurityAuditors",
+            "   aws iam create-group --group-name BillingViewers",
+            "",
+            "4. Attacher policies appropriées aux groups:",
+            "   # Developers:",
+            "   aws iam attach-group-policy --group-name Developers \\",
+            "     --policy-arn arn:aws:iam::aws:policy/PowerUserAccess",
+            "",
+            "   # Operators:",
+            "   aws iam attach-group-policy --group-name Operators \\",
+            "     --policy-arn arn:aws:iam::account:policy/OperatorAccess  # Custom policy",
+            "",
+            "   # SecurityAuditors:",
+            "   aws iam attach-group-policy --group-name SecurityAuditors \\",
+            "     --policy-arn arn:aws:iam::aws:policy/SecurityAudit",
+            "",
+            "5. Migrer users vers groups:",
+            "   # Pour chaque user identifié step 2:",
+            "   # A. Identifier permissions actuelles",
+            "   # B. Déterminer group(s) approprié(s)",
+            "   # C. Ajouter user au(x) group(s):",
+            "   aws iam add-user-to-group --user-name john.doe --group-name Developers",
+            "",
+            "   # D. Tester access avec user (validation)",
+            "",
+            "   # E. Supprimer inline policies:",
+            "   aws iam delete-user-policy --user-name john.doe --policy-name PolicyName",
+            "",
+            "   # F. Detach managed policies:",
+            "   aws iam detach-user-policy --user-name john.doe --policy-arn <arn>",
+            "",
+            "6. Créer AWS Config rule:",
+            "   aws configservice put-config-rule \\",
+            "     --config-rule file://no-direct-user-policies.json",
+            "",
+            "   no-direct-user-policies.json:",
+            "   {",
+            '     "ConfigRuleName": "iam-user-no-policies-check",',
+            '     "Source": {',
+            '       "Owner": "AWS",',
+            '       "SourceIdentifier": "IAM_USER_NO_POLICIES_CHECK"',
+            "     }",
+            "   }",
+            "",
+            "7. Automatiser alerts nouveaux users avec policies:",
+            "   EventBridge rule:",
+            "   Event: AttachUserPolicy, PutUserPolicy",
+            "   Target: SNS topic → alerte security team",
+            "",
+            "8. Documenter groups:",
+            "   Créer wiki/confluence page par group:",
+            "   - Purpose du group",
+            "   - Permissions incluses",
+            "   - Approval process pour membership",
+            "   - Owner du group (qui review memberships)",
+            "   - Quarterly review checklist"
+        ],
+        verification_steps=[
+            "Lister tous users avec inline policies:",
+            "  aws iam list-users | jq -r '.Users[].UserName' | while read u; do",
+            "    policies=$(aws iam list-user-policies --user-name $u --query 'PolicyNames' --output text)",
+            "    [ -n \"$policies\" ] && echo \"$u: $policies\"",
+            "  done",
+            "  # Expected: aucun résultat",
+            "",
+            "Lister users avec managed policies attachées:",
+            "  aws iam list-users | jq -r '.Users[].UserName' | while read u; do",
+            "    policies=$(aws iam list-attached-user-policies --user-name $u --query 'AttachedPolicies[].PolicyName' --output text)",
+            "    [ -n \"$policies\" ] && echo \"$u: $policies\"",
+            "  done",
+            "  # Expected: aucun résultat",
+            "",
+            "Lister tous IAM groups et memberships:",
+            "  aws iam list-groups --query 'Groups[].[GroupName]' --output text | while read g; do",
+            "    echo \"=== Group: $g ===\"",
+            "    aws iam get-group --group-name $g --query 'Users[].[UserName]' --output text",
+            "    aws iam list-attached-group-policies --group-name $g --query 'AttachedPolicies[].[PolicyName]' --output text",
+            "  done",
+            "",
+            "Config rule compliance:",
+            "  aws configservice describe-compliance-by-config-rule \\",
+            "    --config-rule-names iam-user-no-policies-check",
+            "  # Expected: COMPLIANT",
+            "",
+            "SecurityHub CIS check:",
+            "  aws securityhub get-findings \\",
+            "    --filters '{\"GeneratorId\":[{\"Value\":\"arn:aws:securityhub:::ruleset/cis-aws-foundations-benchmark/v/1.4.0/rule/1.16\",\"Comparison\":\"EQUALS\"}]}'",
+            "  # CIS 1.16: Ensure IAM policies attached only to groups or roles",
+            "",
+            "Vérifier aucun user orphelin (pas dans group):",
+            "  aws iam list-users | jq -r '.Users[].UserName' | while read u; do",
+            "    groups=$(aws iam list-groups-for-user --user-name $u --query 'Groups' --output text)",
+            "    [ -z \"$groups\" ] && echo \"Orphan user: $u\"",
+            "  done"
+        ],
+        references=[
+            "https://docs.aws.amazon.com/IAM/latest/UserGuide/id_groups.html",
+            "https://docs.aws.amazon.com/IAM/latest/UserGuide/best-practices.html#use-groups-for-permissions",
+            "https://aws.amazon.com/blogs/security/guidelines-for-when-to-use-accounts-users-and-groups/"
+        ]
+    ),
+
+    Question(
+        id="IAM-010",
+        question="Permission Boundaries implémentées pour délégation sécurisée admin et prévention escalade privilèges?",
+        description="Vérifier que Permission Boundaries sont utilisées pour limiter les permissions maximales des IAM entities, empêchant escalade de privilèges",
+        severity="MEDIUM",
+        category="IAM",
+        compliance=["AWS Well-Architected", "Least Privilege", "Zero Trust"],
+        technical_details="""
+        Permission Boundaries = limite maximale de permissions
+
+        Concept:
+        - Managed policy définissant permissions maximales
+        - Appliquée à user ou role
+        - Effective permissions = Intersection(Identity policy AND Boundary)
+        - Empêche user/role d'obtenir permissions au-delà boundary
+
+        Use cases critiques:
+        1. Délégation admin sécurisée:
+           - Donner CreateUser/CreateRole à dev lead
+           - Boundary empêche création de users/roles admin
+           - Dev lead peut créer users avec max "Developer" permissions
+
+        2. Prévention escalade privilèges:
+           - User avec iam:CreateUser mais boundary restrictive
+           - Ne peut pas créer user plus privilégié que boundary
+           - Protection contre auto-escalation
+
+        3. Multi-tenant environments:
+           - Chaque tenant a boundary limitant à ses resources
+           - Tenant A ne peut pas créer roles accédant à Tenant B
+           - Isolation entre tenants via boundaries
+
+        4. Sandboxing:
+           - Boundaries limitant à specific VPC/Region/Account
+           - Development environments isolés
+           - Experimentation sécurisée
+
+        Comment ça fonctionne:
+        User policy: Allow s3:*, ec2:*, iam:*
+        Boundary: Allow s3:*, ec2:* (pas iam:*)
+        Effective: s3:*, ec2:* (iam:* bloqué par boundary)
+
+        Différence vs SCP:
+        - SCP: appliqué au niveau Organizations (account entier)
+        - Boundary: appliqué au niveau IAM entity (user/role)
+        - Combinaison: effective = Identity AND Boundary AND SCP
+
+        Best practices:
+        - Boundary obligatoire pour tous delegated admins
+        - Condition IAM policy: CreateUser/CreateRole require boundary
+        - Boundary ne peut pas être modifiée par l'entity
+        - Audit régulier: qui a boundary, qui n'en a pas
+        - Documentation claire: quelles boundaries existent, purpose
+
+        Limitations boundaries:
+        - Pas applicable à resource-based policies
+        - Pas applicable à SCPs
+        - User peut toujours assumer role sans boundary (risk)
+        """,
+        remediation=[
+            "1. Créer Permission Boundary pour delegated admins:",
+            "   # Boundary empêchant admin complet:",
+            "   boundary-developer-admin.json:",
+            "   {",
+            '     "Version": "2012-10-17",',
+            '     "Statement": [',
+            "       {",
+            '         "Effect": "Allow",',
+            '         "Action": [',
+            '           "ec2:*",',
+            '           "s3:*",',
+            '           "rds:*",',
+            '           "lambda:*",',
+            '           "logs:*",',
+            '           "cloudwatch:*"',
+            "         ],",
+            '         "Resource": "*"',
+            "       },",
+            "       {",
+            '         "Effect": "Allow",',
+            '         "Action": [',
+            '           "iam:GetUser",',
+            '           "iam:GetRole",',
+            '           "iam:ListUsers",',
+            '           "iam:ListRoles",',
+            '           "iam:GetPolicy",',
+            '           "iam:GetPolicyVersion"',
+            "         ],",
+            '         "Resource": "*"',
+            "       },",
+            "       {",
+            '         "Effect": "Deny",',
+            '         "Action": [',
+            '           "iam:CreateUser",',
+            '           "iam:CreateRole",',
+            '           "iam:DeleteUser",',
+            '           "iam:DeleteRole",',
+            '           "iam:PutUserPolicy",',
+            '           "iam:PutRolePolicy",',
+            '           "iam:AttachUserPolicy",',
+            '           "iam:AttachRolePolicy",',
+            '           "iam:DeleteUserPolicy",',
+            '           "iam:DeleteRolePolicy",',
+            '           "organizations:*",',
+            '           "account:*"',
+            "         ],",
+            '         "Resource": "*"',
+            "       }",
+            "     ]",
+            "   }",
+            "",
+            "   # Créer policy:",
+            "   aws iam create-policy \\",
+            "     --policy-name DeveloperAdminBoundary \\",
+            "     --policy-document file://boundary-developer-admin.json",
+            "",
+            "2. Appliquer boundary à un user/role:",
+            "   # Pour user existant:",
+            "   aws iam put-user-permissions-boundary \\",
+            "     --user-name delegated-admin \\",
+            "     --permissions-boundary arn:aws:iam::account:policy/DeveloperAdminBoundary",
+            "",
+            "   # Pour role existant:",
+            "   aws iam put-role-permissions-boundary \\",
+            "     --role-name developer-admin-role \\",
+            "     --permissions-boundary arn:aws:iam::account:policy/DeveloperAdminBoundary",
+            "",
+            "3. Forcer boundary lors création users/roles:",
+            "   # Policy pour delegated admin (enforcing boundary):",
+            "   delegated-admin-policy.json:",
+            "   {",
+            '     "Version": "2012-10-17",',
+            '     "Statement": [',
+            "       {",
+            '         "Effect": "Allow",',
+            '         "Action": [',
+            '           "iam:CreateUser",',
+            '           "iam:CreateRole"',
+            "         ],",
+            '         "Resource": "*",',
+            '         "Condition": {',
+            '           "StringEquals": {',
+            '             "iam:PermissionsBoundary": "arn:aws:iam::account:policy/DeveloperAdminBoundary"',
+            "           }",
+            "         }",
+            "       },",
+            "       {",
+            '         "Effect": "Allow",',
+            '         "Action": [',
+            '           "iam:AttachUserPolicy",',
+            '           "iam:AttachRolePolicy",',
+            '           "iam:PutUserPolicy",',
+            '           "iam:PutRolePolicy"',
+            "         ],",
+            '         "Resource": "*",',
+            '         "Condition": {',
+            '           "StringEquals": {',
+            '             "iam:PermissionsBoundary": "arn:aws:iam::account:policy/DeveloperAdminBoundary"',
+            "           }",
+            "         }",
+            "       }",
+            "     ]",
+            "   }",
+            "",
+            "   # Attacher au delegated admin:",
+            "   aws iam put-user-policy \\",
+            "     --user-name delegated-admin \\",
+            "     --policy-name EnforceBoundary \\",
+            "     --policy-document file://delegated-admin-policy.json",
+            "",
+            "4. Créer boundary pour isolation tenant:",
+            "   # Boundary limitant à resources avec tag Tenant=A:",
+            "   {",
+            '     "Statement": [{',
+            '       "Effect": "Allow",',
+            '       "Action": "*",',
+            '       "Resource": "*",',
+            '       "Condition": {',
+            '         "StringEquals": {"aws:ResourceTag/Tenant": "A"}',
+            "       }",
+            "     }]",
+            "   }",
+            "",
+            "5. Audit boundaries existantes:",
+            "   # Lister users avec boundary:",
+            "   aws iam list-users | jq -r '.Users[] | select(.PermissionsBoundary) | {UserName, Boundary: .PermissionsBoundary.PermissionsBoundaryArn}'",
+            "",
+            "   # Lister roles avec boundary:",
+            "   aws iam list-roles | jq -r '.Roles[] | select(.PermissionsBoundary) | {RoleName, Boundary: .PermissionsBoundary.PermissionsBoundaryArn}'",
+            "",
+            "6. Identifier users/roles sans boundary (should have):",
+            "   # Users avec CreateUser permission mais sans boundary:",
+            "   # Manual review nécessaire",
+            "",
+            "7. Test escalation attempt:",
+            "   # Avec user ayant boundary, tester:",
+            "   aws iam create-user --user-name test-escalation",
+            "   # Sans --permissions-boundary: devrait échouer (condition)",
+            "",
+            "   aws iam attach-user-policy --user-name test-escalation \\",
+            "     --policy-arn arn:aws:iam::aws:policy/AdministratorAccess",
+            "   # Devrait réussir MAIS effective permissions limitées par boundary"
+        ],
+        verification_steps=[
+            "Lister toutes les permission boundaries définies:",
+            "  aws iam list-policies --scope Local --query 'Policies[?DefaultVersionId].{Name:PolicyName,Arn:Arn}' --output table",
+            "  # Identifier lesquelles sont boundaries (naming convention)",
+            "",
+            "Lister entities avec boundaries:",
+            "  # Users:",
+            "  aws iam list-users --query 'Users[?PermissionsBoundary].[UserName,PermissionsBoundary.PermissionsBoundaryArn]' --output table",
+            "",
+            "  # Roles:",
+            "  aws iam list-roles --query 'Roles[?PermissionsBoundary].[RoleName,PermissionsBoundary.PermissionsBoundaryArn]' --output table",
+            "",
+            "Vérifier enforcement boundary lors création:",
+            "  # Tenter créer user sans boundary (devrait échouer si bien configuré):",
+            "  aws iam create-user --user-name test-no-boundary",
+            "  # Expected: AccessDenied avec message sur condition iam:PermissionsBoundary",
+            "",
+            "Simuler permissions effectives avec boundary:",
+            "  aws iam simulate-principal-policy \\",
+            "    --policy-source-arn arn:aws:iam::account:user/delegated-admin \\",
+            "    --action-names iam:CreateUser iam:DeleteUser s3:PutObject \\",
+            "    --permissions-boundary-policy-input-list file://boundary.json",
+            "",
+            "Audit CloudTrail pour violations boundary attempts:",
+            "  aws cloudtrail lookup-events \\",
+            "    --lookup-attributes AttributeKey=EventName,AttributeValue=CreateUser \\",
+            "    --query 'Events[?errorCode==`AccessDenied`]' \\",
+            "    --max-results 50",
+            "",
+            "Vérifier qui peut modifier boundaries:",
+            "  # Trouver users/roles avec iam:PutUserPermissionsBoundary:",
+            "  # Manual review policies nécessaire",
+            "",
+            "Test effective permissions:",
+            "  # User avec AdministratorAccess policy + boundary restrictive:",
+            "  # Test action bloquée par boundary (ex: organizations:CreateAccount)",
+            "  aws organizations create-account --email test@example.com --account-name Test",
+            "  # Expected: AccessDenied (blocked by boundary)"
+        ],
+        references=[
+            "https://docs.aws.amazon.com/IAM/latest/UserGuide/access_policies_boundaries.html",
+            "https://aws.amazon.com/blogs/security/delegate-permission-management-to-developers-using-iam-permissions-boundaries/",
+            "https://docs.aws.amazon.com/IAM/latest/UserGuide/access_policies_boundaries_delegation.html"
+        ]
     )
 ]
 
@@ -974,6 +1561,636 @@ VPC_QUESTIONS = [
         references=[
             "https://docs.aws.amazon.com/network-firewall/latest/developerguide/what-is-aws-network-firewall.html",
             "https://aws.amazon.com/blogs/networking-and-content-delivery/deployment-models-for-aws-network-firewall/"
+        ]
+    ),
+
+    Question(
+        id="VPC-008",
+        question="Transit Gateway: architecture hub-and-spoke avec isolation routing et segmentation entre environnements?",
+        description="Vérifier que Transit Gateway est utilisé avec route tables séparées pour isoler le trafic entre VPCs/environnements selon principe zero-trust",
+        severity="MEDIUM",
+        category="VPC",
+        compliance=["Zero Trust", "AWS Well-Architected", "Network Segmentation"],
+        technical_details="""
+        AWS Transit Gateway (TGW) = routeur régional cloud
+
+        Fonctionnement:
+        - Hub central connectant VPCs, VPNs, Direct Connect
+        - Remplace VPC peering mesh complexe
+        - Scaling: jusqu'à 5000 VPCs attachés
+        - 50 Gbps per VPC attachment (burst 100 Gbps)
+        - Route tables multiples pour isolation
+
+        Architecture Hub-and-Spoke:
+        - Hub = Transit Gateway
+        - Spokes = VPCs (production, staging, dev, shared services)
+        - Avantages:
+          * Gestion centralisée routing
+          * Pas de peering N-to-N (complexité O(n²))
+          * Inspection centralisée (via firewall VPC)
+          * Facilite audit et compliance
+
+        Segmentation via TGW Route Tables:
+        - Production Route Table: isole VPCs production
+        - Non-Production Route Table: dev/staging
+        - Shared Services Route Table: DNS, AD, monitoring
+        - Egress Route Table: vers Internet/on-prem via firewall
+
+        Isolation patterns:
+        1. Full isolation: aucune route entre prod et dev
+        2. Shared services only: prod/dev → shared services, pas entre eux
+        3. Inspection-based: tout trafic passe par firewall VPC
+
+        TGW Connect pour SD-WAN:
+        - GRE tunnels over TGW
+        - Intégration Cisco Viptela, VMware VeloCloud, etc.
+        - Multicast support
+
+        TGW Peering (inter-region):
+        - Connecter TGW entre régions
+        - DR, global architecture
+        - Encrypted par défaut
+
+        Cost considerations:
+        - $0.05/hour per attachment
+        - $0.02/GB data processed
+        - Optimization: partager TGW entre comptes (RAM)
+
+        Monitoring:
+        - CloudWatch metrics: BytesIn, BytesOut, PacketsDropCountBlackhole
+        - VPC Flow Logs: capture trafic cross-VPC
+        - TGW Network Manager: visualisation topology
+        """,
+        remediation=[
+            "1. Créer Transit Gateway:",
+            "   aws ec2 create-transit-gateway \\",
+            "     --description 'Corporate TGW' \\",
+            "     --options 'AmazonSideAsn=64512,AutoAcceptSharedAttachments=disable,DefaultRouteTableAssociation=disable,DefaultRouteTablePropagation=disable,VpnEcmpSupport=enable,DnsSupport=enable'",
+            "",
+            "   Notes:",
+            "   - DefaultRouteTableAssociation=disable: évite auto-association (sécurité)",
+            "   - DefaultRouteTablePropagation=disable: contrôle explicite routing",
+            "",
+            "2. Créer TGW Route Tables par environnement:",
+            "   # Production RT:",
+            "   aws ec2 create-transit-gateway-route-table \\",
+            "     --transit-gateway-id tgw-xxxxx \\",
+            "     --tag-specifications 'ResourceType=transit-gateway-route-table,Tags=[{Key=Name,Value=Production-RT},{Key=Environment,Value=production}]'",
+            "",
+            "   # Non-Production RT:",
+            "   aws ec2 create-transit-gateway-route-table \\",
+            "     --transit-gateway-id tgw-xxxxx \\",
+            "     --tag-specifications 'ResourceType=transit-gateway-route-table,Tags=[{Key=Name,Value=NonProd-RT},{Key=Environment,Value=non-production}]'",
+            "",
+            "   # Shared Services RT:",
+            "   aws ec2 create-transit-gateway-route-table \\",
+            "     --transit-gateway-id tgw-xxxxx \\",
+            "     --tag-specifications 'ResourceType=transit-gateway-route-table,Tags=[{Key=Name,Value=SharedServices-RT}]'",
+            "",
+            "3. Créer VPC attachments:",
+            "   aws ec2 create-transit-gateway-vpc-attachment \\",
+            "     --transit-gateway-id tgw-xxxxx \\",
+            "     --vpc-id vpc-prod-xxxxx \\",
+            "     --subnet-ids subnet-1 subnet-2 subnet-3 \\",
+            "     --tag-specifications 'ResourceType=transit-gateway-attachment,Tags=[{Key=Name,Value=Production-VPC}]'",
+            "",
+            "   # Répéter pour chaque VPC (staging, dev, shared services)",
+            "",
+            "4. Associer attachments aux route tables appropriées:",
+            "   # Production VPC → Production RT:",
+            "   aws ec2 associate-transit-gateway-route-table \\",
+            "     --transit-gateway-route-table-id tgw-rtb-prod \\",
+            "     --transit-gateway-attachment-id tgw-attach-prod",
+            "",
+            "5. Configurer routes dans TGW Route Tables:",
+            "   # Dans Production RT: route vers Shared Services:",
+            "   aws ec2 create-transit-gateway-route \\",
+            "     --destination-cidr-block 10.0.0.0/16 \\",  # Shared Services VPC CIDR",
+            "     --transit-gateway-route-table-id tgw-rtb-prod \\",
+            "     --transit-gateway-attachment-id tgw-attach-shared",
+            "",
+            "   # Dans Shared Services RT: routes vers Production ET NonProd:",
+            "   aws ec2 create-transit-gateway-route \\",
+            "     --destination-cidr-block 10.1.0.0/16 \\",  # Production VPC",
+            "     --transit-gateway-route-table-id tgw-rtb-shared \\",
+            "     --transit-gateway-attachment-id tgw-attach-prod",
+            "",
+            "   aws ec2 create-transit-gateway-route \\",
+            "     --destination-cidr-block 10.2.0.0/16 \\",  # Dev VPC",
+            "     --transit-gateway-route-table-id tgw-rtb-shared \\",
+            "     --transit-gateway-attachment-id tgw-attach-dev",
+            "",
+            "   # PAS de route entre Production RT et NonProd RT (isolation)",
+            "",
+            "6. Mettre à jour VPC route tables:",
+            "   # Dans VPC Production subnets:",
+            "   aws ec2 create-route \\",
+            "     --route-table-id rtb-prod-private \\",
+            "     --destination-cidr-block 10.0.0.0/8 \\",  # Tous internal",
+            "     --transit-gateway-id tgw-xxxxx",
+            "",
+            "7. Partager TGW avec autres comptes (RAM):",
+            "   aws ram create-resource-share \\",
+            "     --name TGW-Share \\",
+            "     --resource-arns arn:aws:ec2:region:account:transit-gateway/tgw-xxxxx \\",
+            "     --principals arn:aws:organizations::account:organization/o-xxxxx",
+            "",
+            "8. Activer TGW Flow Logs:",
+            "   aws ec2 create-flow-logs \\",
+            "     --resource-type TransitGateway \\",
+            "     --resource-ids tgw-xxxxx \\",
+            "     --traffic-type ALL \\",
+            "     --log-destination-type s3 \\",
+            "     --log-destination arn:aws:s3:::tgw-flow-logs",
+            "",
+            "9. Monitoring CloudWatch:",
+            "   aws cloudwatch put-metric-alarm \\",
+            "     --alarm-name TGW-PacketDrops \\",
+            "     --metric-name PacketDropCountBlackhole \\",
+            "     --namespace AWS/TransitGateway \\",
+            "     --statistic Sum \\",
+            "     --period 300 \\",
+            "     --evaluation-periods 2 \\",
+            "     --threshold 100 \\",
+            "     --comparison-operator GreaterThanThreshold"
+        ],
+        verification_steps=[
+            "Lister Transit Gateways:",
+            "  aws ec2 describe-transit-gateways --query 'TransitGateways[].[TransitGatewayId,State,Options]'",
+            "",
+            "Lister TGW Route Tables:",
+            "  aws ec2 describe-transit-gateway-route-tables --query 'TransitGatewayRouteTables[].[TransitGatewayRouteTableId,Tags[?Key==`Name`].Value|[0]]'",
+            "",
+            "Vérifier associations (VPC attachments → Route Tables):",
+            "  aws ec2 get-transit-gateway-route-table-associations --transit-gateway-route-table-id tgw-rtb-xxxxx",
+            "",
+            "Vérifier routes dans chaque RT:",
+            "  aws ec2 search-transit-gateway-routes \\",
+            "    --transit-gateway-route-table-id tgw-rtb-prod \\",
+            "    --filters Name=state,Values=active",
+            "",
+            "Test isolation: depuis instance Production, ping instance Dev:",
+            "  ping 10.2.1.10  # Dev instance IP",
+            "  # Expected: timeout (pas de route Production → Dev)",
+            "",
+            "Test Shared Services access: depuis Production, ping Shared:",
+            "  ping 10.0.1.10  # Shared Services instance",
+            "  # Expected: success",
+            "",
+            "Vérifier VPC Flow Logs capture TGW traffic:",
+            "  aws logs filter-log-events --log-group-name /aws/tgw/tgw-xxxxx --filter-pattern '[version, account, interface, srcaddr, dstaddr]' --max-items 10",
+            "",
+            "CloudWatch metrics - vérifier pas de packet drops anormaux:",
+            "  aws cloudwatch get-metric-statistics \\",
+            "    --namespace AWS/TransitGateway \\",
+            "    --metric-name PacketDropCountBlackhole \\",
+            "    --dimensions Name=TransitGateway,Value=tgw-xxxxx \\",
+            "    --start-time 2024-01-01T00:00:00Z \\",
+            "    --end-time 2024-01-02T00:00:00Z \\",
+            "    --period 3600 \\",
+            "    --statistics Sum",
+            "",
+            "Visualiser topology (TGW Network Manager):",
+            "  Console: VPC → Transit Gateway Network Manager → Network topology"
+        ],
+        references=[
+            "https://docs.aws.amazon.com/vpc/latest/tgw/what-is-transit-gateway.html",
+            "https://docs.aws.amazon.com/vpc/latest/tgw/tgw-route-tables.html",
+            "https://aws.amazon.com/blogs/networking-and-content-delivery/creating-a-single-internet-exit-point-from-multiple-vpcs-using-aws-transit-gateway/"
+        ]
+    ),
+
+    Question(
+        id="VPC-009",
+        question="AWS PrivateLink utilisé pour exposition sécurisée de services sans Internet/peering/transit gateway?",
+        description="Vérifier que PrivateLink (VPC Endpoint Services) est utilisé pour partager services entre VPCs/comptes de manière privée sans exposer sur Internet",
+        severity="MEDIUM",
+        category="VPC",
+        compliance=["Zero Trust", "AWS Well-Architected", "Data Privacy"],
+        technical_details="""
+        AWS PrivateLink = private connectivity entre VPCs/services
+
+        Architecture:
+        - Service Provider: expose service via Endpoint Service (NLB)
+        - Service Consumer: accède via Interface Endpoint (ENI privée)
+        - Trafic reste sur réseau AWS privé
+        - Pas de VPC peering/TGW/Internet requis
+
+        Avantages vs alternatives:
+        1. vs VPC Peering:
+           - Pas d'overlap CIDR issues
+           - Pas de transitive routing risk
+           - Granular access (service-level, pas VPC entier)
+           - Scaling: 1000s consumers possible
+
+        2. vs Internet:
+           - Pas d'exposition publique
+           - Pas de IGW/NAT Gateway requis
+           - Latence réduite
+           - Pas de data transfer OUT charges
+
+        3. vs Transit Gateway:
+           - Isolation forte (consumer voit seulement endpoint)
+           - Pas de routing visibility entre VPCs
+           - Coût: pas de TGW attachment fees
+
+        Use cases:
+        - SaaS provider → clients (multi-tenant)
+        - Shared services: auth, logging, monitoring
+        - API exposure entre business units
+        - Marketplace services
+        - Partner integration
+
+        PrivateLink pricing:
+        - Endpoint Service (provider): gratuit
+        - Interface Endpoint (consumer): $0.01/hour + $0.01/GB
+        - NLB requis (provider): $0.0225/hour + LCU charges
+
+        Security:
+        - Endpoint policy: IAM-like control sur actions
+        - Security Group sur ENI endpoint
+        - NLB security: listener rules, target health
+        - Private DNS: auto-resolve to endpoint IP
+
+        Multi-account/cross-region:
+        - Cross-account: via principal whitelist
+        - Cross-region: pas supporté directly (use proxy ou TGW)
+        - AWS Organizations integration
+
+        Monitoring:
+        - CloudWatch metrics: ActiveConnections, ProcessedBytes
+        - VPC Flow Logs: voir trafic endpoint
+        - NLB access logs
+        """,
+        remediation=[
+            "Côté Service Provider:",
+            "",
+            "1. Créer Network Load Balancer:",
+            "   aws elbv2 create-load-balancer \\",
+            "     --name my-service-nlb \\",
+            "     --type network \\",
+            "     --scheme internal \\",  # IMPORTANT: internal",
+            "     --subnets subnet-1 subnet-2 subnet-3 \\",
+            "     --tags Key=Name,Value=PrivateLink-NLB",
+            "",
+            "2. Créer Target Group et enregistrer targets:",
+            "   aws elbv2 create-target-group \\",
+            "     --name my-service-targets \\",
+            "     --protocol TCP \\",
+            "     --port 443 \\",
+            "     --vpc-id vpc-xxxxx \\",
+            "     --target-type instance  # ou ip, lambda",
+            "",
+            "   aws elbv2 register-targets \\",
+            "     --target-group-arn <arn> \\",
+            "     --targets Id=i-instance1 Id=i-instance2",
+            "",
+            "3. Créer VPC Endpoint Service:",
+            "   aws ec2 create-vpc-endpoint-service-configuration \\",
+            "     --network-load-balancer-arns arn:aws:elasticloadbalancing:region:account:loadbalancer/net/my-service-nlb/xxxxx \\",
+            "     --acceptance-required  # Require manual approval",
+            "",
+            "   # Si acceptation automatique:",
+            "   aws ec2 create-vpc-endpoint-service-configuration \\",
+            "     --network-load-balancer-arns <nlb-arn> \\",
+            "     --no-acceptance-required",
+            "",
+            "4. Whitelister principals consumers (comptes/roles autorisés):",
+            "   aws ec2 modify-vpc-endpoint-service-permissions \\",
+            "     --service-id vpce-svc-xxxxx \\",
+            "     --add-allowed-principals arn:aws:iam::CONSUMER-ACCOUNT:root",
+            "",
+            "   # Ou utiliser Organizations:",
+            "   aws ec2 modify-vpc-endpoint-service-permissions \\",
+            "     --service-id vpce-svc-xxxxx \\",
+            "     --add-allowed-principals arn:aws:iam::CONSUMER-ACCOUNT:root",
+            "",
+            "5. Activer Private DNS (optionnel):",
+            "   aws ec2 modify-vpc-endpoint-service-configuration \\",
+            "     --service-id vpce-svc-xxxxx \\",
+            "     --private-dns-name api.myservice.com",
+            "   # Nécessite validation DNS (TXT record)",
+            "",
+            "Côté Service Consumer:",
+            "",
+            "6. Créer Interface Endpoint vers service:",
+            "   aws ec2 create-vpc-endpoint \\",
+            "     --vpc-id vpc-consumer-xxxxx \\",
+            "     --vpc-endpoint-type Interface \\",
+            "     --service-name com.amazonaws.vpce.region.vpce-svc-xxxxx \\",  # Provider service name",
+            "     --subnet-ids subnet-1 subnet-2 \\",
+            "     --security-group-ids sg-xxxxx",
+            "",
+            "7. Configurer Security Group pour endpoint:",
+            "   aws ec2 authorize-security-group-ingress \\",
+            "     --group-id sg-endpoint \\",
+            "     --protocol tcp \\",
+            "     --port 443 \\",
+            "     --source-group sg-app-instances  # SG des consumers",
+            "",
+            "8. Créer Endpoint Policy (optionnel - contrôle IAM-like):",
+            "   endpoint-policy.json:",
+            "   {",
+            '     "Statement": [{',
+            '       "Effect": "Allow",',
+            '       "Principal": "*",',
+            '       "Action": "elasticloadbalancing:*",',
+            '       "Resource": "*"',
+            "     }]",
+            "   }",
+            "",
+            "   aws ec2 modify-vpc-endpoint \\",
+            "     --vpc-endpoint-id vpce-xxxxx \\",
+            "     --policy-document file://endpoint-policy.json",
+            "",
+            "9. Activer Private DNS pour endpoint:",
+            "   aws ec2 modify-vpc-endpoint \\",
+            "     --vpc-endpoint-id vpce-xxxxx \\",
+            "     --private-dns-enabled",
+            "",
+            "10. Test connexion depuis consumer VPC:",
+            "    # Récupérer endpoint DNS:",
+            "    aws ec2 describe-vpc-endpoints --vpc-endpoint-ids vpce-xxxxx --query 'VpcEndpoints[].DnsEntries'",
+            "",
+            "    # Test:",
+            "    curl https://vpce-xxxxx-yyyyy.vpce-svc-zzzzz.region.vpce.amazonaws.com",
+            "    # Ou si Private DNS activé:",
+            "    curl https://api.myservice.com"
+        ],
+        verification_steps=[
+            "Provider: lister Endpoint Services:",
+            "  aws ec2 describe-vpc-endpoint-service-configurations",
+            "",
+            "Provider: voir consumers connectés:",
+            "  aws ec2 describe-vpc-endpoint-connections --filters Name=service-id,Values=vpce-svc-xxxxx",
+            "",
+            "Provider: accepter pending connections:",
+            "  aws ec2 accept-vpc-endpoint-connections --service-id vpce-svc-xxxxx --vpc-endpoint-ids vpce-consumer-xxxxx",
+            "",
+            "Consumer: lister endpoints:",
+            "  aws ec2 describe-vpc-endpoints --filters Name=service-name,Values=com.amazonaws.vpce.*",
+            "",
+            "Consumer: vérifier état endpoint:",
+            "  aws ec2 describe-vpc-endpoints --vpc-endpoint-ids vpce-xxxxx --query 'VpcEndpoints[].[VpcEndpointId,State,ServiceName]'",
+            "  # Expected State: available",
+            "",
+            "Tester résolution DNS (si Private DNS activé):",
+            "  nslookup api.myservice.com",
+            "  # Devrait résoudre en IP privée VPC (dans 10.0.0.0/8 range)",
+            "",
+            "Tester connectivité depuis consumer:",
+            "  # Depuis instance dans consumer VPC:",
+            "  curl -v https://vpce-xxxxx.vpce-svc-yyyyy.region.vpce.amazonaws.com/health",
+            "  # Expected: HTTP 200 OK",
+            "",
+            "Vérifier Security Group endpoint autorise trafic:",
+            "  aws ec2 describe-security-groups --group-ids sg-endpoint --query 'SecurityGroups[].IpPermissions'",
+            "",
+            "VPC Flow Logs: voir trafic vers endpoint:",
+            "  aws logs filter-log-events --log-group-name /aws/vpc/flowlogs --filter-pattern 'vpce-xxxxx' --max-items 20",
+            "",
+            "CloudWatch metrics - connexions actives:",
+            "  aws cloudwatch get-metric-statistics \\",
+            "    --namespace AWS/PrivateLinkEndpoints \\",
+            "    --metric-name ActiveConnections \\",
+            "    --dimensions Name=Endpoint,Value=vpce-xxxxx \\",
+            "    --start-time 2024-01-01T00:00:00Z \\",
+            "    --end-time 2024-01-02T00:00:00Z \\",
+            "    --period 3600 \\",
+            "    --statistics Average"
+        ],
+        references=[
+            "https://docs.aws.amazon.com/vpc/latest/privatelink/what-is-privatelink.html",
+            "https://docs.aws.amazon.com/vpc/latest/privatelink/create-endpoint-service.html",
+            "https://aws.amazon.com/blogs/networking-and-content-delivery/how-to-securely-publish-internet-applications-at-scale-using-application-load-balancer-and-aws-privatelink/"
+        ]
+    ),
+
+    Question(
+        id="VPC-010",
+        question="DNS security: Route 53 Resolver avec DNS Firewall pour bloquer domaines malveillants et DNSSEC validation?",
+        description="Vérifier que Route 53 Resolver DNS Firewall est configuré pour bloquer queries vers domaines malveillants et que DNSSEC validation est activée",
+        severity="MEDIUM",
+        category="VPC",
+        compliance=["Zero Trust", "Threat Protection", "CIS Benchmark"],
+        technical_details="""
+        DNS = vecteur d'attaque commun
+
+        Menaces DNS:
+        - Exfiltration via DNS tunneling
+        - C2 communication (malware beacon)
+        - Phishing domains
+        - Cryptomining domains
+        - DGA (Domain Generation Algorithm) domains
+        - DNS cache poisoning
+
+        Route 53 Resolver DNS Firewall:
+        - Filtrage queries DNS sortantes depuis VPC
+        - Blocklists/allowlists de domaines
+        - Intégration threat intelligence (AWS-managed lists)
+        - Response: NODATA, NXDOMAIN, override IP
+        - Logging vers S3/CloudWatch/Kinesis Firehose
+
+        AWS-managed domain lists:
+        - AWSManagedDomainsMalwareDomainList
+        - AWSManagedDomainsBotnetCommandandControl
+        - Régulièrement updated par AWS threat intel
+
+        DNSSEC (DNS Security Extensions):
+        - Validation signatures cryptographiques
+        - Protection contre cache poisoning
+        - Garantie authenticité réponses DNS
+        - Activation via Route 53 Resolver
+
+        Route 53 Resolver:
+        - Default VPC DNS (Amazon-provided)
+        - Resolver endpoints: hybrid DNS (on-prem ↔ AWS)
+        - Inbound endpoint: on-prem query AWS Route 53
+        - Outbound endpoint: AWS query on-prem DNS
+        - Query logging: audit toutes DNS queries
+
+        Architecture DNS sécurisée:
+        1. Route 53 private hosted zones (internes)
+        2. Resolver DNS Firewall (filtrage sortant)
+        3. Resolver query logging (audit)
+        4. DNSSEC validation (authenticité)
+        5. Resolver endpoints si hybrid (on-prem)
+
+        Use cases:
+        - Bloquer accès à domaines malware connus
+        - Empêcher DNS tunneling exfiltration
+        - Compliance: logs de toutes DNS queries
+        - Threat detection: alertes sur queries suspectes
+        """,
+        remediation=[
+            "1. Activer Route 53 Resolver query logging:",
+            "   # Créer CloudWatch Log Group:",
+            "   aws logs create-log-group --log-group-name /aws/route53/resolver-queries",
+            "",
+            "   # Créer Resolver query log config:",
+            "   aws route53resolver create-resolver-query-log-config \\",
+            "     --name vpc-dns-logs \\",
+            "     --destination-arn arn:aws:logs:region:account:log-group:/aws/route53/resolver-queries",
+            "",
+            "   # Associer au VPC:",
+            "   aws route53resolver associate-resolver-query-log-config \\",
+            "     --resolver-query-log-config-id rqlc-xxxxx \\",
+            "     --resource-id vpc-xxxxx",
+            "",
+            "2. Créer DNS Firewall rule group (AWS-managed lists):",
+            "   aws route53resolver create-firewall-rule-group \\",
+            "     --name corporate-dns-firewall \\",
+            "     --tags Key=Environment,Value=production",
+            "",
+            "3. Ajouter rule avec AWS-managed malware list:",
+            "   aws route53resolver create-firewall-rule \\",
+            "     --firewall-rule-group-id frg-xxxxx \\",
+            "     --firewall-domain-list-id arn:aws:route53resolver:region:aws:firewall-domain-list/rslvr-fdl-AWSManagedDomainsMalwareDomainList \\",
+            "     --priority 100 \\",
+            "     --action BLOCK \\",
+            "     --block-response NXDOMAIN \\",
+            "     --name block-malware",
+            "",
+            "4. Ajouter rule avec botnet C2 list:",
+            "   aws route53resolver create-firewall-rule \\",
+            "     --firewall-rule-group-id frg-xxxxx \\",
+            "     --firewall-domain-list-id arn:aws:route53resolver:region:aws:firewall-domain-list/rslvr-fdl-AWSManagedDomainsBotnetCommandandControl \\",
+            "     --priority 101 \\",
+            "     --action BLOCK \\",
+            "     --block-response NXDOMAIN \\",
+            "     --name block-botnet-c2",
+            "",
+            "5. Créer custom domain list (allowlist corporate domains):",
+            "   # Créer fichier domains.txt:",
+            "   # *.mycompany.com",
+            "   # *.aws.amazon.com",
+            "   # *.microsoft.com",
+            "",
+            "   aws route53resolver create-firewall-domain-list \\",
+            "     --name corporate-allowlist \\",
+            "     --domains file://domains.txt",
+            "",
+            "   # Ajouter rule ALLOW avec haute priorité:",
+            "   aws route53resolver create-firewall-rule \\",
+            "     --firewall-rule-group-id frg-xxxxx \\",
+            "     --firewall-domain-list-id fdl-custom-xxxxx \\",
+            "     --priority 50 \\",  # Avant blocklists",
+            "     --action ALLOW \\",
+            "     --name allow-corporate",
+            "",
+            "6. Associer firewall rule group au VPC:",
+            "   aws route53resolver associate-firewall-rule-group \\",
+            "     --firewall-rule-group-id frg-xxxxx \\",
+            "     --vpc-id vpc-xxxxx \\",
+            "     --priority 100 \\",  # Multiple rule groups possible",
+            "     --name production-vpc-firewall",
+            "",
+            "7. Activer DNSSEC validation:",
+            "   # Via VPC DHCP Options Set:",
+            "   aws ec2 create-dhcp-options \\",
+            "     --dhcp-configurations 'Key=domain-name-servers,Values=AmazonProvidedDNS' \\",
+            "     --tag-specifications 'ResourceType=dhcp-options,Tags=[{Key=Name,Value=DNSSEC-enabled}]'",
+            "",
+            "   # Associer au VPC:",
+            "   aws ec2 associate-dhcp-options --dhcp-options-id dopt-xxxxx --vpc-id vpc-xxxxx",
+            "",
+            "   # Note: DNSSEC validation automatique si utilisant Amazon-provided DNS",
+            "",
+            "8. Créer CloudWatch alarms sur queries bloquées:",
+            "   aws cloudwatch put-metric-alarm \\",
+            "     --alarm-name DNS-Firewall-Blocks \\",
+            "     --metric-name BlockedQueries \\",
+            "     --namespace AWS/Route53Resolver \\",
+            "     --statistic Sum \\",
+            "     --period 300 \\",
+            "     --evaluation-periods 1 \\",
+            "     --threshold 10 \\",
+            "     --comparison-operator GreaterThanThreshold \\",
+            "     --dimensions Name=FirewallRuleGroupId,Value=frg-xxxxx \\",
+            "     --alarm-actions arn:aws:sns:region:account:security-alerts",
+            "",
+            "9. Analyser logs pour détection threats:",
+            "   # CloudWatch Logs Insights query:",
+            "   # fields @timestamp, query_name, query_type, rcode, firewall_rule_action",
+            "   # | filter firewall_rule_action = 'BLOCK'",
+            "   # | stats count() by query_name",
+            "   # | sort count desc",
+            "",
+            "10. (Optionnel) Créer Resolver endpoints pour hybrid:",
+            "    # Inbound endpoint (on-prem → AWS):",
+            "    aws route53resolver create-resolver-endpoint \\",
+            "      --creator-request-id $(uuidgen) \\",
+            "      --security-group-ids sg-xxxxx \\",
+            "      --direction INBOUND \\",
+            "      --ip-addresses SubnetId=subnet-1,Ip=10.0.1.10 SubnetId=subnet-2,Ip=10.0.2.10",
+            "",
+            "    # Outbound endpoint (AWS → on-prem):",
+            "    aws route53resolver create-resolver-endpoint \\",
+            "      --creator-request-id $(uuidgen) \\",
+            "      --security-group-ids sg-xxxxx \\",
+            "      --direction OUTBOUND \\",
+            "      --ip-addresses SubnetId=subnet-1 SubnetId=subnet-2"
+        ],
+        verification_steps=[
+            "Vérifier query logging configuré:",
+            "  aws route53resolver list-resolver-query-log-configs",
+            "  aws route53resolver list-resolver-query-log-config-associations --filters Name=ResourceId,Values=vpc-xxxxx",
+            "",
+            "Vérifier DNS Firewall associations:",
+            "  aws route53resolver list-firewall-rule-group-associations --vpc-id vpc-xxxxx",
+            "",
+            "Lister firewall rules:",
+            "  aws route53resolver list-firewall-rules --firewall-rule-group-id frg-xxxxx",
+            "",
+            "Vérifier AWS-managed lists actives:",
+            "  aws route53resolver list-firewall-domain-lists --query 'FirewallDomainLists[?ManagedOwnerName==`Route 53 Resolver DNS Firewall`]'",
+            "",
+            "Test blocage domaine malveillant (depuis instance VPC):",
+            "  # Tester query vers domaine dans blocklist:",
+            "  nslookup malicious-test-domain.example.com",
+            "  # Expected: NXDOMAIN ou NODATA",
+            "",
+            "  dig malicious-test-domain.example.com",
+            "  # Expected: status NXDOMAIN",
+            "",
+            "Test allowlist corporate domain:",
+            "  nslookup myapp.mycompany.com",
+            "  # Expected: normal resolution",
+            "",
+            "Analyser query logs:",
+            "  aws logs tail /aws/route53/resolver-queries --follow",
+            "  # Chercher: firewall_rule_action = BLOCK",
+            "",
+            "CloudWatch Insights - top blocked domains:",
+            "  Query:",
+            "  fields @timestamp, query_name",
+            "  | filter firewall_rule_action = 'BLOCK'",
+            "  | stats count() by query_name as blocks",
+            "  | sort blocks desc",
+            "  | limit 20",
+            "",
+            "Vérifier DNSSEC validation:",
+            "  dig +dnssec example.com",
+            "  # Doit montrer flags: ad (authenticated data)",
+            "",
+            "Metrics CloudWatch - queries bloquées:",
+            "  aws cloudwatch get-metric-statistics \\",
+            "    --namespace AWS/Route53Resolver \\",
+            "    --metric-name BlockedQueries \\",
+            "    --dimensions Name=FirewallRuleGroupId,Value=frg-xxxxx \\",
+            "    --start-time 2024-01-01T00:00:00Z \\",
+            "    --end-time 2024-01-02T00:00:00Z \\",
+            "    --period 3600 \\",
+            "    --statistics Sum",
+            "",
+            "Vérifier resolver endpoints (si hybrid):",
+            "  aws route53resolver list-resolver-endpoints"
+        ],
+        references=[
+            "https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/resolver-dns-firewall.html",
+            "https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/resolver-query-logs.html",
+            "https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/resolver-dnssec-validation.html",
+            "https://aws.amazon.com/blogs/security/how-to-protect-your-company-from-dns-based-threats-using-route-53-resolver-dns-firewall/"
         ]
     )
 ]
@@ -1558,6 +2775,577 @@ EC2_QUESTIONS = [
             "https://www.cisecurity.org/cis-benchmarks/",
             "https://aws.amazon.com/blogs/mt/create-immutable-servers-using-ec2-image-builder-aws-codepipeline/"
         ]
+    ),
+
+    Question(
+        id="EC2-006",
+        question="Security Groups audit: règles trop permissives (0.0.0.0/0), ports inutiles, documentation règles?",
+        description="Vérifier que les Security Groups n'ont pas de règles trop ouvertes (0.0.0.0/0), que seuls les ports nécessaires sont ouverts, et que les règles sont documentées",
+        severity="HIGH",
+        category="EC2",
+        compliance=["CIS Benchmark", "PCI-DSS", "NIST", "Zero Trust"],
+        technical_details="""
+        Security Groups = stateful firewall au niveau instance/ENI
+
+        Risques règles trop permissives:
+        - 0.0.0.0/0 sur ports sensibles (SSH 22, RDP 3389, DB ports)
+        - Exposition inutile de services internes
+        - Attack surface élargie
+        - Risque brute force, exploitation vulnérabilités
+        - Non-compliance avec standards sécurité
+
+        Ports sensibles à restreindre:
+        - 22 (SSH): limiter à IP admin ou bastion uniquement
+        - 3389 (RDP): limiter à IP admin ou bastion
+        - 3306 (MySQL), 5432 (PostgreSQL): limiter à app tier
+        - 1433 (MSSQL), 27017 (MongoDB): limiter à app tier
+        - 6379 (Redis), 11211 (Memcached): limiter à app tier
+        - 9200 (Elasticsearch), 5601 (Kibana): limiter à trusted IPs
+        - 8080, 8443 (App servers): derrière ALB uniquement
+
+        Best practices Security Groups:
+        - Principe least privilege: minimal ports ouverts
+        - Source restriction: security group IDs plutôt que CIDRs
+        - Pas de 0.0.0.0/0 sauf ALB/CloudFront (ports 80/443)
+        - Naming convention: <env>-<tier>-<service>-sg
+        - Description obligatoire pour chaque règle
+        - Tagging: Owner, Purpose, Environment
+        - Regular audit: trimestrial minimum
+        - Unused SGs cleanup
+
+        Référencement par SG ID vs CIDR:
+        - Avantage SG ID: dynamique (instances ajoutées/retirées auto)
+        - Exemple: App tier SG référence DB tier SG au lieu de CIDR
+        - Permet micro-segmentation architecture
+        - Évite hardcoding IP ranges
+
+        Logging et monitoring:
+        - VPC Flow Logs: voir trafic rejected par SGs
+        - CloudWatch alarms: sur rules changes
+        - AWS Config: detect overly permissive SGs
+        - SecurityHub: automated compliance checks
+        """,
+        remediation=[
+            "1. Audit règles trop ouvertes (0.0.0.0/0):",
+            "   aws ec2 describe-security-groups \\",
+            "     --query 'SecurityGroups[?IpPermissions[?IpRanges[?CidrIp==`0.0.0.0/0`]]].[GroupId,GroupName,IpPermissions[?IpRanges[?CidrIp==`0.0.0.0/0`]]]'",
+            "",
+            "2. Identifier SSH/RDP ouverts à Internet:",
+            "   aws ec2 describe-security-groups \\",
+            "     --filters Name=ip-permission.from-port,Values=22 \\",
+            "               Name=ip-permission.cidr,Values='0.0.0.0/0' \\",
+            "     --query 'SecurityGroups[].[GroupId,GroupName,VpcId]'",
+            "",
+            "   # Même pour RDP (port 3389)",
+            "   aws ec2 describe-security-groups \\",
+            "     --filters Name=ip-permission.from-port,Values=3389 \\",
+            "               Name=ip-permission.cidr,Values='0.0.0.0/0'",
+            "",
+            "3. Créer AWS Config rule - restricted-ssh:",
+            "   aws configservice put-config-rule \\",
+            "     --config-rule file://restricted-ssh-rule.json",
+            "",
+            "   restricted-ssh-rule.json:",
+            "   {",
+            '     "ConfigRuleName": "restricted-ssh",',
+            '     "Source": {',
+            '       "Owner": "AWS",',
+            '       "SourceIdentifier": "INCOMING_SSH_DISABLED"',
+            "     }",
+            "   }",
+            "",
+            "4. Créer AWS Config rule - restricted-common-ports:",
+            "   Rule: restricted-common-ports",
+            "   Parameters: blockedPort1=3389,blockedPort2=3306,blockedPort3=5432",
+            "",
+            "5. Remédiation - Remplacer 0.0.0.0/0 par CIDR restreint:",
+            "   # Supprimer règle ouverte",
+            "   aws ec2 revoke-security-group-ingress \\",
+            "     --group-id sg-xxxxx \\",
+            "     --protocol tcp \\",
+            "     --port 22 \\",
+            "     --cidr 0.0.0.0/0",
+            "",
+            "   # Ajouter règle restreinte (ex: VPN IP range)",
+            "   aws ec2 authorize-security-group-ingress \\",
+            "     --group-id sg-xxxxx \\",
+            "     --protocol tcp \\",
+            "     --port 22 \\",
+            "     --cidr 203.0.113.0/24 \\",
+            "     --group-rule-description 'SSH from corporate VPN'",
+            "",
+            "6. Remplacer CIDR par Security Group reference:",
+            "   # Pour app → DB access",
+            "   aws ec2 authorize-security-group-ingress \\",
+            "     --group-id sg-db-xxxxx \\",
+            "     --protocol tcp \\",
+            "     --port 3306 \\",
+            "     --source-group sg-app-xxxxx \\",
+            "     --group-rule-description 'MySQL from app tier'",
+            "",
+            "7. Nettoyer unused Security Groups:",
+            "   # Lister SGs non attachés",
+            "   aws ec2 describe-security-groups --query 'SecurityGroups[?length(IpPermissions)==`0`].[GroupId,GroupName]'",
+            "",
+            "   # Supprimer si non utilisé:",
+            "   aws ec2 delete-security-group --group-id sg-xxxxx",
+            "",
+            "8. Activer SecurityHub pour checks automatiques:",
+            "   aws securityhub enable-security-hub",
+            "   aws securityhub batch-enable-standards \\",
+            "     --standards-subscription-requests '[{\"StandardsArn\":\"arn:aws:securityhub:region::standards/cis-aws-foundations-benchmark/v/1.4.0\"}]'",
+            "",
+            "9. CloudWatch Events pour alertes modifications SG:",
+            "   EventBridge rule: AuthorizeSecurityGroupIngress, RevokeSecurityGroupIngress",
+            "   Target: SNS topic pour notifications équipe sécurité"
+        ],
+        verification_steps=[
+            "Rapport règles 0.0.0.0/0:",
+            "  aws ec2 describe-security-groups \\",
+            "    --query 'SecurityGroups[?IpPermissions[?IpRanges[?CidrIp==`0.0.0.0/0`]]].{ID:GroupId,Name:GroupName,VPC:VpcId}' \\",
+            "    --output table",
+            "",
+            "Vérifier aucun SSH/RDP ouvert publiquement (résultat vide attendu):",
+            "  aws ec2 describe-security-groups \\",
+            "    --filters Name=ip-permission.from-port,Values=22,3389 \\",
+            "              Name=ip-permission.cidr,Values='0.0.0.0/0'",
+            "",
+            "Config rules compliance:",
+            "  aws configservice describe-compliance-by-config-rule \\",
+            "    --config-rule-names restricted-ssh restricted-common-ports",
+            "",
+            "SecurityHub findings:",
+            "  aws securityhub get-findings \\",
+            "    --filters '{\"ProductFields\":[{\"Key\":\"aws/securityhub/ProductName\",\"Value\":\"Security Hub\",\"Comparison\":\"EQUALS\"}],\"ResourceType\":[{\"Value\":\"AwsEc2SecurityGroup\",\"Comparison\":\"EQUALS\"}]}'",
+            "",
+            "Lister SGs avec descriptions manquantes:",
+            "  aws ec2 describe-security-groups \\",
+            "    --query 'SecurityGroups[?IpPermissions[?(!Description)]].{GroupId:GroupId,Rule:IpPermissions}'",
+            "",
+            "VPC Flow Logs - vérifier REJECTs:",
+            "  Athena query: SELECT * FROM vpc_flow_logs WHERE action='REJECT' ORDER BY start DESC LIMIT 100",
+            "",
+            "Unused Security Groups:",
+            "  aws ec2 describe-network-interfaces \\",
+            "    --query 'NetworkInterfaces[].Groups[].GroupId' | sort | uniq",
+            "  # Comparer avec liste totale SGs pour trouver unused"
+        ],
+        references=[
+            "https://docs.aws.amazon.com/vpc/latest/userguide/VPC_SecurityGroups.html",
+            "https://docs.aws.amazon.com/config/latest/developerguide/managed-rules-by-aws-config.html",
+            "https://docs.aws.amazon.com/securityhub/latest/userguide/securityhub-cis-controls.html"
+        ]
+    ),
+
+    Question(
+        id="EC2-007",
+        question="EC2 Instance Connect activé pour accès SSH temporaire sans gestion de clés permanentes?",
+        description="Vérifier que EC2 Instance Connect est utilisé pour accès SSH temporaire avec credentials éphémères via IAM au lieu de clés SSH permanentes",
+        severity="MEDIUM",
+        category="EC2",
+        compliance=["AWS Well-Architected", "Zero Trust", "Least Privilege"],
+        technical_details="""
+        EC2 Instance Connect:
+        - Accès SSH temporaire via IAM (pas de clés permanentes)
+        - Push one-time SSH public key vers instance metadata
+        - Clé valide 60 secondes
+        - Authentication via IAM permissions
+        - Audit via CloudTrail (SendSSHPublicKey)
+        - Compatible Amazon Linux 2, Ubuntu 16.04+
+
+        Avantages vs clés SSH traditionnelles:
+        - Pas de gestion/distribution clés privées
+        - Pas de clés stockées sur postes utilisateurs
+        - Révocation instantanée (via IAM)
+        - Rotation automatique (clés éphémères)
+        - Audit centralisé CloudTrail
+        - MFA enforcement possible via IAM
+        - Pas de risque clé compromise/volée
+
+        Comparaison solutions accès EC2:
+        1. Clés SSH traditionnelles:
+           - Clés permanentes difficiles à rotate
+           - Pas d'audit qui utilise quelle clé
+           - Risque vol/partage clés
+           - Gestion complexe (qui a accès?)
+
+        2. EC2 Instance Connect:
+           - Clés éphémères (60s)
+           - IAM-based (granular permissions)
+           - Audit CloudTrail
+           - Pas de gestion clés
+
+        3. Systems Manager Session Manager:
+           - Pas SSH du tout (HTTPS)
+           - Pas de ports ouverts
+           - Logging complet sessions
+           - Plus sécurisé mais nécessite SSM Agent
+
+        Architecture Instance Connect:
+        - User → IAM auth → EC2 Instance Connect API
+        - API push temporary public key → instance metadata
+        - User SSH avec private key correspondante
+        - Après 60s: clé expirée, supprimée metadata
+
+        Prérequis:
+        - EC2 Instance Connect package installé
+        - Security Group autorise SSH depuis EC2_INSTANCE_CONNECT service (IP ranges AWS)
+        - IAM permission: ec2-instance-connect:SendSSHPublicKey
+        - Instance dans région supportée
+
+        Use case idéal:
+        - Accès admin ponctuel/troubleshooting
+        - Environnements où audit strict requis
+        - Éviter partage clés SSH entre utilisateurs
+        - Break-glass access
+        """,
+        remediation=[
+            "1. Installer EC2 Instance Connect sur instances:",
+            "   # Amazon Linux 2 (déjà inclus sur AMIs récentes)",
+            "   sudo yum install -y ec2-instance-connect",
+            "",
+            "   # Ubuntu 20.04+",
+            "   sudo apt install -y ec2-instance-connect",
+            "",
+            "   # Vérifier service actif:",
+            "   sudo systemctl status ec2-instance-connect",
+            "",
+            "2. Configurer Security Group pour Instance Connect:",
+            "   # Récupérer IP ranges EC2_INSTANCE_CONNECT pour région",
+            "   aws ec2 describe-managed-prefix-lists \\",
+            "     --filters Name=prefix-list-name,Values='com.amazonaws.*.ec2-instance-connect' \\",
+            "     --query 'PrefixLists[0].PrefixListId'",
+            "",
+            "   # Autoriser SSH depuis prefix list:",
+            "   aws ec2 authorize-security-group-ingress \\",
+            "     --group-id sg-xxxxx \\",
+            "     --ip-permissions IpProtocol=tcp,FromPort=22,ToPort=22,PrefixListIds=[{PrefixListId=pl-xxxxx,Description='EC2 Instance Connect'}]",
+            "",
+            "3. Créer IAM policy pour utilisateurs:",
+            "   {",
+            '     "Version": "2012-10-17",',
+            '     "Statement": [{',
+            '       "Effect": "Allow",',
+            '       "Action": "ec2-instance-connect:SendSSHPublicKey",',
+            '       "Resource": "arn:aws:ec2:region:account:instance/*",',
+            '       "Condition": {',
+            '         "StringEquals": {',
+            '           "ec2:osuser": "ec2-user"',
+            "         }",
+            "       }",
+            "     },",
+            "     {",
+            '       "Effect": "Allow",',
+            '       "Action": "ec2:DescribeInstances",',
+            '       "Resource": "*"',
+            "     }]",
+            "   }",
+            "",
+            "4. Attacher policy au groupe IAM utilisateurs:",
+            "   aws iam put-group-policy \\",
+            "     --group-name Developers \\",
+            "     --policy-name EC2InstanceConnectAccess \\",
+            "     --policy-document file://instance-connect-policy.json",
+            "",
+            "5. Connexion via AWS CLI:",
+            "   # Méthode 1: AWS CLI helper (génère clé automatiquement)",
+            "   aws ec2-instance-connect ssh --instance-id i-xxxxx",
+            "",
+            "   # Méthode 2: Manuelle",
+            "   # Générer keypair temporaire:",
+            "   ssh-keygen -t rsa -f /tmp/temp_key -N ''",
+            "",
+            "   # Push public key vers instance:",
+            "   aws ec2-instance-connect send-ssh-public-key \\",
+            "     --instance-id i-xxxxx \\",
+            "     --availability-zone us-east-1a \\",
+            "     --instance-os-user ec2-user \\",
+            "     --ssh-public-key file:///tmp/temp_key.pub",
+            "",
+            "   # Connexion SSH dans 60 secondes:",
+            "   ssh -i /tmp/temp_key ec2-user@<instance-ip>",
+            "",
+            "6. Connexion via Console (browser-based):",
+            "   EC2 Console → Instance → Connect → EC2 Instance Connect → Connect",
+            "",
+            "7. Désactiver accès SSH traditionnel:",
+            "   # Supprimer authorized_keys existantes",
+            "   # Bloquer port 22 depuis Internet dans SG (garder uniquement prefix list)",
+            "",
+            "8. Enforcer MFA pour accès Instance Connect:",
+            "   IAM policy condition:",
+            "   \"Condition\": {",
+            "     \"BoolIfExists\": {\"aws:MultiFactorAuthPresent\": \"true\"}",
+            "   }"
+        ],
+        verification_steps=[
+            "Vérifier package installé sur instances:",
+            "  rpm -qa | grep ec2-instance-connect  # Amazon Linux",
+            "  dpkg -l | grep ec2-instance-connect  # Ubuntu",
+            "",
+            "Vérifier SG autorise EC2_INSTANCE_CONNECT:",
+            "  aws ec2 describe-security-groups --group-ids sg-xxxxx \\",
+            "    --query 'SecurityGroups[].IpPermissions[?FromPort==`22`].PrefixListIds'",
+            "",
+            "Test connexion Instance Connect:",
+            "  aws ec2-instance-connect ssh --instance-id i-xxxxx",
+            "",
+            "Audit CloudTrail - voir utilisation:",
+            "  aws cloudtrail lookup-events \\",
+            "    --lookup-attributes AttributeKey=EventName,AttributeValue=SendSSHPublicKey \\",
+            "    --max-results 50",
+            "",
+            "Vérifier IAM permissions utilisateurs:",
+            "  aws iam get-group-policy --group-name Developers --policy-name EC2InstanceConnectAccess",
+            "",
+            "Test depuis Console EC2:",
+            "  EC2 → Select instance → Connect → EC2 Instance Connect tab → Connect button",
+            "",
+            "Vérifier logs SSH sur instance:",
+            "  sudo tail -f /var/log/secure  # Amazon Linux",
+            "  sudo tail -f /var/log/auth.log  # Ubuntu",
+            "  # Chercher: \"Accepted publickey for ec2-user from...\"",
+            "",
+            "Lister IP ranges EC2 Instance Connect pour région:",
+            "  aws ec2 describe-managed-prefix-lists \\",
+            "    --filters Name=prefix-list-name,Values='com.amazonaws.*.ec2-instance-connect' \\",
+            "    --query 'PrefixLists[].[PrefixListId,PrefixListName]'"
+        ],
+        references=[
+            "https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/Connect-using-EC2-Instance-Connect.html",
+            "https://aws.amazon.com/blogs/compute/new-using-amazon-ec2-instance-connect-for-ssh-access-to-your-ec2-instances/",
+            "https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-instance-connect-methods.html"
+        ]
+    ),
+
+    Question(
+        id="EC2-008",
+        question="Protection terminaison instances critiques et stratégie backup EBS avec lifecycle automatisé?",
+        description="Vérifier que termination protection est activée sur instances critiques et que stratégie de backup automatisée existe pour volumes EBS avec rétention appropriée",
+        severity="MEDIUM",
+        category="EC2",
+        compliance=["Business Continuity", "Disaster Recovery", "Data Protection"],
+        technical_details="""
+        Termination Protection:
+        - Empêche suppression accidentelle instance via console/API/CLI
+        - Attribut DisableApiTermination = true
+        - Protection contre: ec2:TerminateInstances API calls
+        - Ne protège pas contre: shutdown depuis OS, Auto Scaling termination
+        - À activer sur: production databases, stateful apps, long-running workloads
+
+        DeleteOnTermination attribute (EBS):
+        - Par défaut: root volume deleted, data volumes retained
+        - Risque: data loss si mal configuré
+        - Best practice: false pour data volumes (DB, logs, user data)
+        - Root volume: peut être true si immutable infrastructure
+
+        AWS Backup service:
+        - Backup centralisé multi-services (EC2, EBS, RDS, EFS, etc.)
+        - Backup plans: scheduling, retention, lifecycle
+        - Backup vaults: storage avec encryption KMS
+        - Cross-region copy: disaster recovery
+        - Point-in-time recovery
+        - Compliance reporting
+
+        Stratégie backup EBS:
+        1. Snapshots automatiques (AWS Backup ou Data Lifecycle Manager)
+        2. Rétention selon RPO/RTO:
+           - Critical (RPO<1h): snapshots toutes les 4h, rétention 30j
+           - Important (RPO<24h): snapshots daily, rétention 14j
+           - Standard (RPO<7j): snapshots weekly, rétention 7j
+        3. Cross-region replication pour DR
+        4. Tagging snapshots pour organisation/coûts
+        5. Testing régulier restore
+
+        EBS Snapshots particularités:
+        - Incrementaux (seuls blocks modifiés)
+        - Stockage S3 (durability 99.999999999%)
+        - Copy cross-region pour DR
+        - Encryption preserved (si volume source encrypted)
+        - Fast Snapshot Restore (FSR) pour restauration rapide
+
+        Amazon Data Lifecycle Manager (DLM):
+        - Alternative légère à AWS Backup
+        - Policies basées sur tags
+        - Automatisation création/rétention/suppression snapshots
+        - Gratuit (seulement coût storage snapshots)
+        - Cross-account sharing snapshots
+
+        Testing DR:
+        - Drill réguliers: restore snapshot vers nouvelle instance
+        - Vérifier integrity data
+        - Documenter RTO réel
+        - GameDays: simulation panne
+        """,
+        remediation=[
+            "1. Activer Termination Protection instances critiques:",
+            "   # Identifier instances production sans protection:",
+            "   aws ec2 describe-instances \\",
+            "     --filters Name=tag:Environment,Values=production \\",
+            "     --query 'Reservations[].Instances[?DisableApiTermination==`false`].[InstanceId,Tags[?Key==`Name`].Value|[0]]'",
+            "",
+            "   # Activer protection:",
+            "   aws ec2 modify-instance-attribute \\",
+            "     --instance-id i-xxxxx \\",
+            "     --disable-api-termination",
+            "",
+            "   # Vérifier:",
+            "   aws ec2 describe-instance-attribute \\",
+            "     --instance-id i-xxxxx \\",
+            "     --attribute disableApiTermination",
+            "",
+            "2. Configurer DeleteOnTermination pour data volumes:",
+            "   # Vérifier current setting:",
+            "   aws ec2 describe-instances --instance-id i-xxxxx \\",
+            "     --query 'Reservations[].Instances[].BlockDeviceMappings[].[DeviceName,Ebs.VolumeId,Ebs.DeleteOnTermination]'",
+            "",
+            "   # Désactiver DeleteOnTermination pour data volume:",
+            "   aws ec2 modify-instance-attribute \\",
+            "     --instance-id i-xxxxx \\",
+            "     --block-device-mappings '[{\"DeviceName\":\"/dev/sdf\",\"Ebs\":{\"DeleteOnTermination\":false}}]'",
+            "",
+            "3. Créer AWS Backup plan:",
+            "   aws backup create-backup-plan \\",
+            "     --backup-plan file://backup-plan.json",
+            "",
+            "   backup-plan.json:",
+            "   {",
+            '     "BackupPlanName": "DailyEBSBackup",',
+            '     "Rules": [{',
+            '       "RuleName": "DailyBackup",',
+            '       "TargetBackupVaultName": "Default",',
+            '       "ScheduleExpression": "cron(0 5 ? * * *)",',
+            '       "StartWindowMinutes": 60,',
+            '       "CompletionWindowMinutes": 120,',
+            '       "Lifecycle": {',
+            '         "DeleteAfterDays": 30,',
+            '         "MoveToColdStorageAfterDays": 7',
+            "       },",
+            '       "RecoveryPointTags": {',
+            '         "BackupType": "Automated"',
+            "       }",
+            "     }]",
+            "   }",
+            "",
+            "4. Assigner resources au backup plan (via tags):",
+            "   aws backup create-backup-selection \\",
+            "     --backup-plan-id <plan-id> \\",
+            "     --backup-selection file://selection.json",
+            "",
+            "   selection.json:",
+            "   {",
+            '     "SelectionName": "ProductionEBS",',
+            '     "IamRoleArn": "arn:aws:iam::account:role/AWSBackupDefaultServiceRole",',
+            '     "Resources": ["*"],',
+            '     "ListOfTags": [{',
+            '       "ConditionType": "STRINGEQUALS",',
+            '       "ConditionKey": "Environment",',
+            '       "ConditionValue": "production"',
+            "     }]",
+            "   }",
+            "",
+            "5. Alternative: Data Lifecycle Manager (DLM):",
+            "   aws dlm create-lifecycle-policy \\",
+            "     --execution-role-arn arn:aws:iam::account:role/AWSDataLifecycleManagerDefaultRole \\",
+            "     --description 'Daily EBS snapshots' \\",
+            "     --state ENABLED \\",
+            "     --policy-details file://dlm-policy.json",
+            "",
+            "   dlm-policy.json:",
+            "   {",
+            '     "ResourceTypes": ["VOLUME"],',
+            '     "TargetTags": [{"Key": "Backup", "Value": "true"}],',
+            '     "Schedules": [{',
+            '       "Name": "DailySnapshots",',
+            '       "CreateRule": {"Interval": 24, "IntervalUnit": "HOURS", "Times": ["03:00"]},',
+            '       "RetainRule": {"Count": 14},',
+            '       "TagsToAdd": [{"Key": "SnapshotType", "Value": "DLM"}],',
+            '       "CopyTags": true',
+            "     }]",
+            "   }",
+            "",
+            "6. Configurer cross-region copy pour DR:",
+            "   # Dans backup plan, ajouter CopyActions:",
+            '     "CopyActions": [{',
+            '       "DestinationBackupVaultArn": "arn:aws:backup:eu-west-1:account:backup-vault:DR-Vault",',
+            '       "Lifecycle": {"DeleteAfterDays": 90}',
+            "     }]",
+            "",
+            "7. Tagging discipline pour backups:",
+            "   aws ec2 create-tags --resources vol-xxxxx \\",
+            "     --tags Key=Backup,Value=true Key=BackupFrequency,Value=Daily Key=Retention,Value=30days",
+            "",
+            "8. Créer backup vault avec encryption:",
+            "   aws backup create-backup-vault \\",
+            "     --backup-vault-name SecureVault \\",
+            "     --encryption-key-arn arn:aws:kms:region:account:key/xxxxx",
+            "",
+            "9. Tester restore process:",
+            "   # Restore snapshot vers nouveau volume:",
+            "   aws ec2 create-volume \\",
+            "     --snapshot-id snap-xxxxx \\",
+            "     --availability-zone us-east-1a \\",
+            "     --volume-type gp3",
+            "",
+            "   # Attacher et tester integrity:",
+            "   aws ec2 attach-volume --volume-id vol-xxxxx --instance-id i-xxxxx --device /dev/sdf"
+        ],
+        verification_steps=[
+            "Instances sans termination protection:",
+            "  aws ec2 describe-instance-attribute \\",
+            "    --instance-id i-xxxxx \\",
+            "    --attribute disableApiTermination",
+            "  # DisableApiTermination: {Value: true} attendu pour production",
+            "",
+            "Volumes avec DeleteOnTermination=true (risqué):",
+            "  aws ec2 describe-instances \\",
+            "    --query 'Reservations[].Instances[].BlockDeviceMappings[?Ebs.DeleteOnTermination==`true`].[Ebs.VolumeId,DeviceName]'",
+            "",
+            "Backup plans actifs:",
+            "  aws backup list-backup-plans",
+            "  aws backup get-backup-plan --backup-plan-id <plan-id>",
+            "",
+            "Backup selections (resources couverts):",
+            "  aws backup list-backup-selections --backup-plan-id <plan-id>",
+            "",
+            "Recovery points récents:",
+            "  aws backup list-recovery-points-by-backup-vault \\",
+            "    --backup-vault-name Default \\",
+            "    --max-results 20",
+            "",
+            "DLM policies:",
+            "  aws dlm get-lifecycle-policies",
+            "  aws dlm get-lifecycle-policy --policy-id policy-xxxxx",
+            "",
+            "Snapshots récents par volume:",
+            "  aws ec2 describe-snapshots --owner-ids self \\",
+            "    --filters Name=volume-id,Values=vol-xxxxx \\",
+            "    --query 'Snapshots[].[SnapshotId,StartTime,State]' \\",
+            "    --output table",
+            "",
+            "Compliance reporting AWS Backup:",
+            "  aws backup list-backup-jobs --by-backup-vault-name Default",
+            "  aws backup list-backup-jobs --by-state COMPLETED --max-results 10",
+            "",
+            "Test restore (dry-run):",
+            "  aws backup start-restore-job \\",
+            "    --recovery-point-arn <arn> \\",
+            "    --iam-role-arn <role> \\",
+            "    --metadata file://restore-metadata.json",
+            "",
+            "Coût snapshots:",
+            "  aws ce get-cost-and-usage \\",
+            "    --time-period Start=2024-01-01,End=2024-01-31 \\",
+            "    --granularity MONTHLY \\",
+            "    --metrics UnblendedCost \\",
+            "    --filter file://snapshot-filter.json"
+        ],
+        references=[
+            "https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/terminating-instances.html#Using_ChangingDisableAPITermination",
+            "https://docs.aws.amazon.com/aws-backup/latest/devguide/whatisbackup.html",
+            "https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/snapshot-lifecycle.html",
+            "https://aws.amazon.com/blogs/storage/automating-amazon-ebs-snapshot-and-ami-management-using-amazon-dlm/"
+        ]
     )
 ]
 
@@ -1889,6 +3677,111 @@ S3_QUESTIONS = [
         remediation=["put-bucket-versioning MFADelete=Enabled", "put-bucket-lifecycle-configuration transitions", "Intelligent-Tiering pour auto-optimization"],
         verification_steps=["get-bucket-versioning", "get-bucket-lifecycle-configuration", "S3 Storage Lens metrics par classe"],
         references=["https://docs.aws.amazon.com/AmazonS3/latest/userguide/Versioning.html", "https://docs.aws.amazon.com/AmazonS3/latest/userguide/object-lifecycle-mgmt.html"]
+    ),
+
+    Question(
+        id="S3-004",
+        question="S3 access logging activé et CloudTrail data events configurés pour audit complet accès objets?",
+        description="Vérifier logging accès S3 (server access logs) et CloudTrail data events pour traçabilité complète",
+        severity="HIGH",
+        category="S3",
+        compliance=["Audit Trail", "PCI-DSS", "HIPAA", "SOC2"],
+        technical_details="S3 Server Access Logs: capture requêtes bucket-level (GET, PUT, DELETE). CloudTrail data events: capture API calls objet-level avec identité caller. Complémentaires pour audit forensics",
+        remediation=[
+            "aws s3api put-bucket-logging --bucket source-bucket --bucket-logging-status file://logging.json",
+            "CloudTrail data events: aws cloudtrail put-event-selectors --trail-name trail --event-selectors '[{\"ReadWriteType\":\"All\",\"DataResources\":[{\"Type\":\"AWS::S3::Object\",\"Values\":[\"arn:aws:s3:::bucket/*\"]}]}]'",
+            "Analyser logs avec Athena pour détection accès non autorisés"
+        ],
+        verification_steps=[
+            "aws s3api get-bucket-logging --bucket mybucket",
+            "aws cloudtrail get-event-selectors --trail-name trail | grep S3",
+            "Vérifier logs S3 dans target bucket: aws s3 ls s3://logs-bucket/",
+            "Athena query: SELECT * FROM s3_access_logs WHERE status='403' OR status='404'"
+        ],
+        references=[
+            "https://docs.aws.amazon.com/AmazonS3/latest/userguide/ServerLogs.html",
+            "https://docs.aws.amazon.com/awscloudtrail/latest/userguide/logging-data-events-with-cloudtrail.html"
+        ]
+    ),
+
+    Question(
+        id="S3-005",
+        question="S3 Object Lock (WORM) activé pour données réglementées avec retention compliance mode?",
+        description="Vérifier Object Lock avec Compliance/Governance mode pour protection immuable données critiques",
+        severity="HIGH",
+        category="S3",
+        compliance=["SEC Rule 17a-4", "FINRA", "HIPAA", "GDPR"],
+        technical_details="Object Lock WORM (Write Once Read Many): Compliance mode (immuable même root), Governance mode (bypass avec permissions). Retention period + Legal Hold. Requis pour compliance financière/santé",
+        remediation=[
+            "Créer bucket avec Object Lock: aws s3api create-bucket --bucket compliant-bucket --object-lock-enabled-for-bucket",
+            "aws s3api put-object-lock-configuration --bucket compliant-bucket --object-lock-configuration 'ObjectLockEnabled=Enabled,Rule={DefaultRetention={Mode=COMPLIANCE,Years=7}}'",
+            "Legal hold sur objet spécifique: aws s3api put-object-legal-hold --bucket bucket --key file.pdf --legal-hold Status=ON"
+        ],
+        verification_steps=[
+            "aws s3api get-object-lock-configuration --bucket mybucket",
+            "aws s3api get-object-retention --bucket bucket --key file.pdf",
+            "aws s3api get-object-legal-hold --bucket bucket --key file.pdf",
+            "Test: tenter suppression objet locked (doit échouer)"
+        ],
+        references=[
+            "https://docs.aws.amazon.com/AmazonS3/latest/userguide/object-lock.html",
+            "https://aws.amazon.com/blogs/storage/how-to-use-s3-object-lock-to-meet-compliance-requirements/"
+        ]
+    ),
+
+    Question(
+        id="S3-006",
+        question="S3 Replication (CRR/SRR) configurée pour disaster recovery et compliance multi-région?",
+        description="Vérifier Cross-Region Replication ou Same-Region Replication pour resilience et conformité géographique",
+        severity="MEDIUM",
+        category="S3",
+        compliance=["Disaster Recovery", "Data Residency", "GDPR"],
+        technical_details="CRR: réplication cross-region pour DR et latency. SRR: réplication same-region pour aggregation/compliance. Réplication automatique asynchrone. Supporte RTC (15min SLA), Delete marker replication, Replica modification sync",
+        remediation=[
+            "aws s3api put-bucket-versioning --bucket source --versioning-configuration Status=Enabled",
+            "aws s3api put-bucket-versioning --bucket destination --versioning-configuration Status=Enabled",
+            "aws s3api put-bucket-replication --bucket source --replication-configuration file://replication.json",
+            "IAM role avec s3:ReplicateObject, s3:ReplicateDelete permissions",
+            "Activer Replication Time Control pour SLA 15min"
+        ],
+        verification_steps=[
+            "aws s3api get-bucket-replication --bucket source-bucket",
+            "CloudWatch metrics: aws cloudwatch get-metric-statistics --namespace AWS/S3 --metric-name ReplicationLatency",
+            "Vérifier objets répliqués: aws s3 ls s3://destination-bucket/ --recursive",
+            "Test: upload objet source, vérifier apparition dans destination sous 15min"
+        ],
+        references=[
+            "https://docs.aws.amazon.com/AmazonS3/latest/userguide/replication.html",
+            "https://docs.aws.amazon.com/AmazonS3/latest/userguide/replication-time-control.html"
+        ]
+    ),
+
+    Question(
+        id="S3-007",
+        question="S3 Inventory et Storage Class Analysis activés pour governance et optimisation coûts?",
+        description="Vérifier S3 Inventory pour audit objets et Analytics pour recommandations lifecycle/tiering",
+        severity="LOW",
+        category="S3",
+        compliance=["FinOps", "Data Governance"],
+        technical_details="S3 Inventory: rapport CSV/Parquet de tous objets (metadata, encryption, storage class). Storage Class Analysis: recommande transitions lifecycle basées sur patterns accès. S3 Storage Lens: métriques organisation-wide",
+        remediation=[
+            "aws s3api put-bucket-inventory-configuration --bucket mybucket --id daily-inventory --inventory-configuration file://inventory.json",
+            "aws s3api put-bucket-analytics-configuration --bucket mybucket --id storage-analytics --analytics-configuration file://analytics.json",
+            "S3 Storage Lens: activer via console pour dashboard organisation-wide",
+            "Athena queries sur inventory pour trouver objets non chiffrés, non versionnés, etc."
+        ],
+        verification_steps=[
+            "aws s3api list-bucket-inventory-configurations --bucket mybucket",
+            "aws s3api list-bucket-analytics-configurations --bucket mybucket",
+            "Vérifier inventory reports dans destination bucket: aws s3 ls s3://inventory-bucket/",
+            "Athena CREATE TABLE depuis inventory manifest puis SELECT encryption_status, COUNT(*) GROUP BY encryption_status",
+            "Storage Class Analysis recommendations après 30 jours observation"
+        ],
+        references=[
+            "https://docs.aws.amazon.com/AmazonS3/latest/userguide/storage-inventory.html",
+            "https://docs.aws.amazon.com/AmazonS3/latest/userguide/analytics-storage-class.html",
+            "https://docs.aws.amazon.com/AmazonS3/latest/userguide/storage_lens.html"
+        ]
     )
 ]
 
