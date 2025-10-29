@@ -6,18 +6,43 @@ Ce guide vous aidera à installer et lancer l'application sur macOS, en évitant
 
 ## 🚨 Problèmes Courants sur macOS
 
-L'erreur que vous rencontrez avec numpy est un problème courant sur macOS lié à:
+### Problème 1: Erreurs de compilation numpy/pandas
+L'erreur avec numpy est un problème courant sur macOS lié à:
 - Versions anciennes de numpy/pandas qui ne compilent pas avec les nouveaux outils Xcode
 - Incompatibilités entre les versions de Python et les bibliothèques C
+
+### Problème 2: Python 3.14+ et pyarrow
+**Symptôme**: `error: command 'cmake' failed: No such file or directory`
+
+Si vous utilisez **Python 3.14**, pyarrow n'a pas encore de wheels précompilés. Vous avez 3 options:
+
+1. **RECOMMANDÉ**: Utiliser Python 3.11 ou 3.12 (voir section ci-dessous)
+2. Installer cmake: `brew install cmake apache-arrow`
+3. Utiliser conda qui a des builds préconstruits
+
+## 🔍 Diagnostic Rapide
+
+Avant de commencer, lance le script de diagnostic:
+
+```bash
+./diagnose-macos.sh
+```
+
+Ce script va:
+- ✅ Détecter votre version de Python
+- ✅ Identifier les problèmes potentiels
+- ✅ Proposer les solutions adaptées à votre configuration
 
 ## ✅ Solution Recommandée (Méthode Rapide)
 
 ### Prérequis
 
-1. **Python 3.9+** (recommandé: 3.11)
+1. **Python 3.9 à 3.13** (recommandé: **3.11** ou **3.12**)
    ```bash
    python3 --version
    ```
+
+   ⚠️ **IMPORTANT**: Python 3.14+ peut causer des problèmes car certains packages (pyarrow) n'ont pas encore de wheels précompilés. Si vous avez Python 3.14, suivez les instructions spéciales ci-dessous.
 
 2. **Homebrew** (optionnel mais recommandé)
    ```bash
@@ -35,6 +60,73 @@ Ce script va automatiquement:
 - ✅ Créer un environnement virtuel
 - ✅ Installer les bonnes versions des dépendances
 - ✅ Lancer l'application
+
+## 🐍 Cas Spécial: Python 3.14+
+
+Si vous avez Python 3.14, vous **devez** utiliser une version plus ancienne de Python pour éviter les problèmes de compilation.
+
+### Solution 1: Installer Python 3.11 via Homebrew (Recommandé)
+
+```bash
+# Installer Python 3.11
+brew install python@3.11
+
+# Créer l'environnement virtuel avec Python 3.11
+python3.11 -m venv venv
+
+# Activer l'environnement
+source venv/bin/activate
+
+# Vérifier la version (devrait montrer 3.11.x)
+python --version
+
+# Installer les dépendances
+pip install --upgrade pip setuptools wheel
+pip install -r requirements-macos.txt
+
+# Lancer l'application
+streamlit run app.py
+```
+
+### Solution 2: Installer cmake pour compiler pyarrow
+
+Si vous voulez absolument utiliser Python 3.14:
+
+```bash
+# Installer les outils de compilation
+brew install cmake apache-arrow
+
+# Créer l'environnement
+python3 -m venv venv
+source venv/bin/activate
+
+# Installer (peut prendre du temps, compilation en cours)
+pip install --upgrade pip setuptools wheel
+pip install -r requirements-macos.txt
+
+# Lancer
+streamlit run app.py
+```
+
+### Solution 3: Utiliser pyenv pour gérer les versions Python
+
+```bash
+# Installer pyenv
+brew install pyenv
+
+# Installer Python 3.11
+pyenv install 3.11.7
+
+# Utiliser cette version pour le projet
+pyenv local 3.11.7
+
+# Créer l'environnement
+python -m venv venv
+source venv/bin/activate
+
+# Installer
+pip install -r requirements-macos.txt
+```
 
 ## 📝 Installation Manuelle (Si le script échoue)
 

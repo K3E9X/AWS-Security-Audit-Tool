@@ -59,20 +59,33 @@ error: metadata-generation-failed
 **Cause**: Versions anciennes incompatibles avec macOS récents et nouveaux outils Xcode
 **Solution**: Configuration optimisée avec wheels précompilés
 
+### 3. Python 3.14 et pyarrow (NOUVEAU)
+**Problème**:
+```
+error: command 'cmake' failed: No such file or directory
+ERROR: Failed building wheel for pyarrow
+```
+**Cause**: Python 3.14 trop récent, pyarrow n'a pas de wheels précompilés
+**Solution**: Utiliser Python 3.11/3.12 ou installer cmake
+
 ## ✨ Nouveautés
 
 ### Scripts de Lancement
 - **`run.sh`** - Script automatique pour Linux
 - **`run-macos.sh`** - Script automatique pour macOS avec environnement virtuel
+- **`diagnose-macos.sh`** - Diagnostic automatique pour détecter problèmes Python
 
 ### Documentation
 - **`README_INSTALLATION.md`** - Guide complet d'installation et tests
-- **`README_MACOS.md`** - Guide spécifique macOS avec dépannage avancé
+- **`README_MACOS.md`** - Guide spécifique macOS avec dépannage avancé (Python 3.14 inclus)
 - **`QUICKSTART.md`** - Guide de démarrage rapide multi-plateforme
+- **`FIX_PYTHON_314.md`** - Guide express pour résoudre problèmes Python 3.14
+- **`PR_INFO.md`** - Instructions pour créer la Pull Request
 
 ### Configuration
 - **`requirements.txt`** - Mis à jour avec versions flexibles (>=)
 - **`requirements-macos.txt`** - Configuration optimisée pour macOS
+- **`requirements-macos-minimal.txt`** - Configuration alternative sans pyarrow
 
 ## 📊 Changements Techniques
 
@@ -90,6 +103,8 @@ error: metadata-generation-failed
 - ✅ macOS Ventura/Sonoma/Sequoia
 - ✅ Apple Silicon (M1/M2/M3)
 - ✅ macOS Intel x86_64
+- ✅ Python 3.9 à 3.13 (recommandé: 3.11/3.12)
+- ⚠️ Python 3.14 (support avec instructions spéciales)
 
 ## 🧪 Tests Effectués
 
@@ -113,10 +128,14 @@ error: metadata-generation-failed
 ### Nouveaux Fichiers
 - `run.sh` - Script de lancement Linux
 - `run-macos.sh` - Script de lancement macOS
+- `diagnose-macos.sh` - Script de diagnostic macOS
 - `README_INSTALLATION.md` - Documentation installation
-- `README_MACOS.md` - Guide macOS
+- `README_MACOS.md` - Guide macOS complet
+- `FIX_PYTHON_314.md` - Fix rapide Python 3.14
 - `QUICKSTART.md` - Guide rapide
+- `PR_INFO.md` - Instructions PR
 - `requirements-macos.txt` - Config macOS
+- `requirements-macos-minimal.txt` - Config minimale macOS
 
 ### Fichiers Modifiés
 - `requirements.txt` - Versions mises à jour
@@ -166,6 +185,8 @@ streamlit run app.py
 
 - `dfe4e57` - Fix: Résolution du problème de lancement de l'application + documentation
 - `726e3cd` - Fix: Support macOS avec résolution des erreurs de compilation numpy/pandas
+- `d086ef9` - Docs: Ajout des instructions pour créer la Pull Request
+- `6bf4bfc` - Fix: Ajout support Python 3.14 et diagnostic macOS amélioré
 
 ---
 
