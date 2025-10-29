@@ -9139,6 +9139,130 @@ CLOUDFRONT_QUESTIONS = [
         remediation=["update-distribution --restrictions", "Générer signed URLs avec CloudFront key pair", "Lambda@Edge pour auth custom"],
         verification_steps=["get-distribution --query 'Distribution.DistributionConfig.Restrictions'", "Test signed URL generation"],
         references=["https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/PrivateContent.html"]
+    ),
+
+    Question(
+        id="CF-004",
+        question="Field-Level Encryption configuré pour protéger données sensibles (PCI, PII) end-to-end?",
+        description="Vérifier Field-Level Encryption pour chiffrement additionnel champs sensibles (credit cards, SSN) du edge au origin",
+        severity="HIGH",
+        category="CloudFront",
+        compliance=["PCI-DSS", "HIPAA", "GDPR Data Protection"],
+        technical_details="Field-Level Encryption = double encryption layer. CloudFront encrypt champs spécifiques avec public key RSA-2048, origin déchiffre avec private key. Données jamais en clair dans logs CloudFront. Use cases: cartes crédit, SSN, données médicales",
+        remediation=[
+            "1. Générer RSA key pair: openssl genrsa -out private.pem 2048 && openssl rsa -pubout -in private.pem -out public.pem",
+            "2. Créer public key CloudFront: aws cloudfront create-public-key --public-key-config",
+            "3. Créer profile encryption: aws cloudfront create-field-level-encryption-profile --field-patterns credit_card,cvv",
+            "4. Créer config: aws cloudfront create-field-level-encryption-config",
+            "5. Associer à distribution: update-distribution --field-level-encryption-id",
+            "6. Origin app déchiffre avec private key (crypto.privateDecrypt)"
+        ],
+        verification_steps=[
+            "aws cloudfront list-field-level-encryption-configs",
+            "Test POST form avec credit card",
+            "Vérifier champ encrypted (base64) dans origin",
+            "Vérifier logs CloudFront ne contiennent PAS données en clair"
+        ],
+        references=["https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/field-level-encryption.html"]
+    ),
+
+    Question(
+        id="CF-005",
+        question="Lambda@Edge ou CloudFront Functions déployés pour security headers injection et bot detection?",
+        description="Vérifier edge computing pour security headers (HSTS, CSP, X-Frame-Options), bot blocking, et authentification au edge",
+        severity="MEDIUM",
+        category="CloudFront",
+        compliance=["OWASP Security Headers", "Bot Protection"],
+        technical_details="CloudFront Functions (sub-ms latency, $0.10/1M): headers manipulation, URL rewrites. Lambda@Edge (full runtime, $0.60/1M): complex auth, image transform, A/B testing. Use cases: inject HSTS/CSP, block scrapers via User-Agent, JWT validation, geo-based routing",
+        remediation=[
+            "1. CloudFront Function pour security headers (viewer-response):",
+            "   function handler(event) {",
+            "     var response = event.response;",
+            "     response.headers['strict-transport-security'] = {value: 'max-age=31536000'};",
+            "     response.headers['content-security-policy'] = {value: \"default-src 'self'\"};",
+            "     response.headers['x-frame-options'] = {value: 'DENY'};",
+            "     return response;",
+            "   }",
+            "2. Deploy: aws cloudfront create-function --function-code",
+            "3. Lambda@Edge pour bot detection (viewer-request):",
+            "   if (/bot|curl|wget/i.test(userAgent)) { return {status: '403'}; }",
+            "4. Monitor: aws cloudwatch get-metric-statistics --metric-name LambdaExecutionError"
+        ],
+        verification_steps=[
+            "curl -I https://cdn.example.com",
+            "Vérifier headers: strict-transport-security, content-security-policy, x-frame-options",
+            "Test bot detection: curl -A 'curl/7.68' https://cdn.example.com (doit retourner 403)",
+            "Vérifier CloudWatch Logs Lambda@Edge dans multiples régions"
+        ],
+        references=[
+            "https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/cloudfront-functions.html",
+            "https://docs.aws.amazon.com/lambda/latest/dg/lambda-edge.html"
+        ]
+    ),
+
+    Question(
+        id="CF-006",
+        question="Origin Shield activé et cache behaviors optimisés pour maximiser cache hit ratio (>85%)?",
+        description="Vérifier Origin Shield comme layer additionnel caching + cache behaviors configurés pour performance et protection origin DDoS",
+        severity="MEDIUM",
+        category="CloudFront",
+        compliance=["Performance Optimization", "DDoS Protection"],
+        technical_details="Origin Shield = central caching layer. Architecture: User → Edge (200+) → Origin Shield (1 region) → Origin. Avantages: ↑ cache hit ratio (+20-30%), ↓ origin requests (90%), protection DDoS. Cache behaviors: static assets TTL=1day+, API TTL=0, compression gzip/brotli, query string whitelist (strip tracking params utm_*, fbclid)",
+        remediation=[
+            "1. Activer Origin Shield proche origin: aws cloudfront update-distribution --origin-shield Enabled=true,OriginShieldRegion=us-east-1",
+            "2. Cache behavior static assets (long TTL): PathPattern='/static/*' DefaultTTL=86400 Compress=true",
+            "3. Cache behavior API (no cache): PathPattern='/api/*' DefaultTTL=0 ForwardAllHeaders",
+            "4. Cache policy whitelist query params: QueryStringBehavior=whitelist Items=[id,page] (strip utm_source, fbclid)",
+            "5. Monitor cache hit ratio: aws cloudwatch get-metric-statistics --metric-name CacheHitRate (target >85%)",
+            "6. Cache invalidation: aws cloudfront create-invalidation --paths '/index.html' (1000/month free)"
+        ],
+        verification_steps=[
+            "aws cloudfront get-distribution-config --query 'Origins[].OriginShield'",
+            "Test static asset: curl -I https://cdn.example.com/static/logo.png (x-cache: Hit from cloudfront)",
+            "Monitor cache hit ratio: aws cloudwatch get-metric-statistics --metric-name CacheHitRate (doit être >85%)",
+            "Vérifier compression: curl -H 'Accept-Encoding: gzip' -I (content-encoding: gzip)",
+            "Test query string filtering: curl 'https://cdn.example.com?id=1&utm_source=x' (utm_source stripped)"
+        ],
+        references=[
+            "https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/origin-shield.html",
+            "https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/cache-hit-ratio.html"
+        ]
+    ),
+
+    Question(
+        id="CF-007",
+        question="Real-Time Logs configurés vers Kinesis pour monitoring, analytics, et security investigations?",
+        description="Vérifier CloudFront Real-Time Logs pour observabilité temps réel, détection DDoS, et forensics (vs Standard Logs delayed 1hr+)",
+        severity="MEDIUM",
+        category="CloudFront",
+        compliance=["Real-Time Monitoring", "Security Analytics", "Incident Response"],
+        technical_details="Real-Time Logs = streaming continu vers Kinesis Data Streams (<1 sec latency) vs Standard Logs (S3, 1hr+ delay). Use cases: real-time DDoS detection, bot traffic analysis, P95 latency monitoring, security investigations. Fields: timestamp, c-ip, cs-method, cs-uri-stem, sc-status, sc-bytes, time-taken, cs-user-agent. Integration: Kinesis → Lambda → Elasticsearch/CloudWatch/S3. Pricing: $0.01 per 1M log lines",
+        remediation=[
+            "1. Créer Kinesis Data Stream: aws kinesis create-stream --stream-name cloudfront-realtime-logs --shard-count 2",
+            "2. IAM role CloudFront → Kinesis: Action kinesis:PutRecord Resource stream ARN",
+            "3. Créer Real-Time Log Config:",
+            "   aws cloudfront create-realtime-log-config \\",
+            "     --name production-logs \\",
+            "     --end-points StreamType=Kinesis,KinesisStreamConfig={RoleARN=...,StreamARN=...} \\",
+            "     --fields timestamp c-ip cs-method cs-uri-stem sc-status sc-bytes time-taken cs-user-agent x-edge-location",
+            "     --sampling-rate 100",
+            "4. Associer à cache behavior: update-distribution --default-cache-behavior RealtimeLogConfigArn=...",
+            "5. Consumer Lambda pour alerting: trigger sur Kinesis, parse logs, alarme si sc-status 5xx > threshold",
+            "6. Firehose → S3 long-term: aws firehose create-delivery-stream --source Kinesis --destination S3"
+        ],
+        verification_steps=[
+            "aws cloudfront list-realtime-log-configs",
+            "Vérifier Kinesis stream reçoit data: aws kinesis get-records --shard-iterator",
+            "Test génération traffic: curl https://cdn.example.com",
+            "Vérifier logs temps réel dans Kinesis (<1 sec)",
+            "Query logs via Kinesis Analytics ou Lambda consumer",
+            "Monitor DDoS: stats count() by c-ip (detect spike single IP)",
+            "Latency analysis: percentile(time-taken, 95) by bin(1m)"
+        ],
+        references=[
+            "https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/real-time-logs.html",
+            "https://aws.amazon.com/blogs/networking-and-content-delivery/amazon-cloudfront-announces-real-time-logs/"
+        ]
     )
 ]
 
@@ -9181,6 +9305,138 @@ KMS_QUESTIONS = [
         remediation=["schedule-key-deletion --pending-window-in-days 30", "Alarme sur ScheduleKeyDeletion events", "Cancel avec cancel-key-deletion"],
         verification_steps=["describe-key --query 'KeyMetadata.KeyState'", "Identifier keys dans PendingDeletion state"],
         references=["https://docs.aws.amazon.com/kms/latest/developerguide/deleting-keys.html"]
+    ),
+
+    Question(
+        id="KMS-004",
+        question="Multi-Region KMS keys configurés pour disaster recovery et applications multi-region?",
+        description="Vérifier utilisation multi-region keys pour cross-region encrypted backups, global apps avec low-latency encryption",
+        severity="MEDIUM",
+        category="KMS",
+        compliance=["Disaster Recovery", "Business Continuity", "Global Applications"],
+        technical_details="Multi-Region Keys = primary key + replica keys dans autres régions (same key ID, material). Use cases: cross-region encrypted snapshots (RDS, Aurora), global DynamoDB avec encryption, S3 replication encrypted. Avantages: pas besoin re-encrypt lors cross-region copy, low-latency local encryption. Rotation: automatic synchronization replicas",
+        remediation=[
+            "1. Créer multi-region primary key: aws kms create-key --multi-region --description 'Global encryption key'",
+            "2. Créer replica dans autre région: aws kms replicate-key --key-id mrk-xxx --replica-region eu-west-1",
+            "3. Use case RDS cross-region backup: aws rds create-db-snapshot --kms-key-id mrk-xxx puis copy-db-snapshot --kms-key-id mrk-xxx (même key ID différente région)",
+            "4. DynamoDB global tables encryption: aws dynamodb create-global-table --replication-group RegionName=us-east-1,KMSMasterKeyId=mrk-xxx RegionName=eu-west-1,KMSMasterKeyId=mrk-xxx",
+            "5. Monitor replication: aws kms describe-key --key-id mrk-xxx --query 'KeyMetadata.MultiRegionConfiguration'"
+        ],
+        verification_steps=[
+            "aws kms list-keys --query 'Keys[?starts_with(KeyId, `mrk-`)]' (lister multi-region keys)",
+            "aws kms describe-key --key-id mrk-xxx --query 'KeyMetadata.MultiRegionConfiguration'",
+            "Vérifier replicas dans régions requises pour DR",
+            "Test cross-region encrypted snapshot copy (RDS/EBS) avec même key ID"
+        ],
+        references=[
+            "https://docs.aws.amazon.com/kms/latest/developerguide/multi-region-keys-overview.html",
+            "https://aws.amazon.com/blogs/aws/new-encrypt-global-data-client-side-with-aws-kms-multi-region-keys/"
+        ]
+    ),
+
+    Question(
+        id="KMS-005",
+        question="KMS Grants utilisés pour permissions temporaires et service integrations (au lieu d'ajouter IAM policies directement)?",
+        description="Vérifier utilisation grants pour délégation temporaire encryption/decryption rights (EBS, RDS, Lambda, S3) avec auto-revocation",
+        severity="MEDIUM",
+        category="KMS",
+        compliance=["Least Privilege", "Temporary Access", "Service Integration"],
+        technical_details="KMS Grants = temporary permissions vs IAM policies (permanent). Use cases: EBS attach encrypted volume (grant auto-created puis auto-revoked), S3 encrypted multipart upload, Lambda encrypted env vars, RDS encrypted snapshot restore. Avantages: granular (specific operations), time-limited, revocable programmatically. Grant operations: Encrypt, Decrypt, GenerateDataKey, RetireGrant",
+        remediation=[
+            "1. Créer grant pour service: aws kms create-grant --key-id xxx --grantee-principal arn:aws:iam::account:role/LambdaRole --operations Decrypt GenerateDataKey",
+            "2. Lister grants actifs: aws kms list-grants --key-id xxx",
+            "3. Grant avec contraintes (encryption context): --constraints EncryptionContextSubset={Department=Finance}",
+            "4. Retire grant après usage: aws kms retire-grant --grant-token xxx ou revoke-grant --grant-id xxx",
+            "5. Monitor grants: CloudTrail CreateGrant, RetireGrant events",
+            "6. Audit grants long-lived: list-grants puis filter CreationDate > 30 days"
+        ],
+        verification_steps=[
+            "aws kms list-grants --key-id xxx",
+            "Vérifier grants ont CreationDate récente (<30 jours) ou sont auto-managed (AWS services)",
+            "CloudTrail lookup-events --lookup-attributes AttributeKey=EventName,AttributeValue=CreateGrant",
+            "Test grant avec encryption context: aws kms encrypt --key-id xxx --plaintext hello --encryption-context Dept=Finance (doit fonctionner avec grant ayant contrainte Dept=Finance)"
+        ],
+        references=[
+            "https://docs.aws.amazon.com/kms/latest/developerguide/grants.html",
+            "https://docs.aws.amazon.com/kms/latest/APIReference/API_CreateGrant.html"
+        ]
+    ),
+
+    Question(
+        id="KMS-006",
+        question="Key material origin configuré approprié (AWS managed vs EXTERNAL pour BYOK compliance)?",
+        description="Vérifier origin key material: AWS (default) vs EXTERNAL (bring your own key) pour compliance exigeant HSM on-premises",
+        severity="HIGH",
+        category="KMS",
+        compliance=["BYOK", "Regulatory Compliance", "HSM Requirements"],
+        technical_details="Key Material Origin: AWS (KMS generates, FIPS 140-2 Level 2 HSM) vs EXTERNAL (import from on-prem HSM, FIPS Level 3+). EXTERNAL use cases: regulatory compliance exigeant key generation on-premises, dual control key generation, key portability cross-cloud. Limitations EXTERNAL: pas auto-rotation (manual), expiration key material (must re-import), responsabilité backup key material. CloudHSM vs KMS EXTERNAL: CloudHSM = dedicated HSM (FIPS 140-2 Level 3), KMS EXTERNAL = shared HSM",
+        remediation=[
+            "1. Créer CMK avec external key material: aws kms create-key --origin EXTERNAL",
+            "2. Générer wrapping key pour import sécurisé: aws kms get-parameters-for-import --key-id xxx --wrapping-algorithm RSAES_OAEP_SHA_256 --wrapping-key-spec RSA_2048",
+            "3. Sur HSM on-premises: générer 256-bit AES key, encrypt avec wrapping public key",
+            "4. Import encrypted key material: aws kms import-key-material --key-id xxx --encrypted-key-material fileb://encrypted-key.bin --import-token fileb://token.bin --expiration-model KEY_MATERIAL_EXPIRES --valid-to 2025-12-31T23:59:59Z",
+            "5. Rotation manuelle: delete-imported-key-material, re-import new material (users must re-encrypt)",
+            "6. Backup key material on-premises (KMS ne stocke PAS pour EXTERNAL keys)"
+        ],
+        verification_steps=[
+            "aws kms describe-key --key-id xxx --query 'KeyMetadata.Origin' (doit être AWS ou EXTERNAL selon compliance)",
+            "Vérifier keys avec Origin=EXTERNAL ont expiration date configurée",
+            "Auditer backup key material on-premises existe (disaster recovery)",
+            "Pour compliance requiring on-prem generation: vérifier toutes CMKs critiques sont EXTERNAL",
+            "CloudTrail lookup ImportKeyMaterial events (validation import réussi)"
+        ],
+        references=[
+            "https://docs.aws.amazon.com/kms/latest/developerguide/importing-keys.html",
+            "https://docs.aws.amazon.com/kms/latest/developerguide/importing-keys-encrypt-key-material.html"
+        ]
+    ),
+
+    Question(
+        id="KMS-007",
+        question="Envelope encryption implémenté correctement et data key caching utilisé pour haute performance?",
+        description="Vérifier applications utilisent GenerateDataKey (envelope encryption) avec caching pour minimize KMS API calls et improve latency",
+        severity="MEDIUM",
+        category="KMS",
+        compliance=["Performance Optimization", "Cost Reduction", "Encryption Best Practices"],
+        technical_details="Envelope Encryption: encrypt data avec data key (AES-256), encrypt data key avec CMK. Avantages: performance (CMK jamais quitte KMS), network efficiency (encrypt locally avec data key). Data Key Caching: réutiliser data keys pour multiple encrypt operations (AWS Encryption SDK feature). Caching benefits: ↓ KMS API calls (cost), ↓ latency (pas appel KMS chaque encryption), max messages per data key configurable (default 100). Security: cache TTL limité, cache size limité",
+        remediation=[
+            "1. Envelope encryption pattern (Python):",
+            "   import boto3",
+            "   kms = boto3.client('kms')",
+            "   # Generate data key",
+            "   response = kms.generate_data_key(KeyId='alias/my-key', KeySpec='AES_256')",
+            "   plaintext_key = response['Plaintext']",
+            "   encrypted_key = response['CiphertextBlob']",
+            "   # Encrypt data with plaintext data key (local, fast)",
+            "   from cryptography.fernet import Fernet",
+            "   cipher = Fernet(plaintext_key)",
+            "   encrypted_data = cipher.encrypt(b'sensitive data')",
+            "   # Store: encrypted_data + encrypted_key",
+            "",
+            "2. AWS Encryption SDK avec data key caching:",
+            "   from aws_encryption_sdk import EncryptionSDKClient",
+            "   from aws_encryption_sdk.caches import LocalCryptoMaterialsCache",
+            "   cache = LocalCryptoMaterialsCache(capacity=100)",
+            "   client = EncryptionSDKClient(materials_cache=cache, max_age=300, max_messages_encrypted=1000)",
+            "",
+            "3. Monitor KMS API call rate:",
+            "   aws cloudwatch get-metric-statistics --namespace AWS/KMS --metric-name NumberOfCalls --dimensions Name=Operation,Value=GenerateDataKey",
+            "",
+            "4. Optimize: increase cache TTL si high volume encryption (balance security vs performance)",
+            "5. Decrypt pattern: extract encrypted data key, call kms.decrypt(CiphertextBlob=encrypted_key), decrypt data locally"
+        ],
+        verification_steps=[
+            "Code review: chercher kms.encrypt() direct (anti-pattern, slow) vs kms.generate_data_key() (envelope encryption, correct)",
+            "Vérifier AWS Encryption SDK utilisé pour data key caching (import aws_encryption_sdk)",
+            "Monitor KMS API calls rate: aws cloudwatch get-metric-statistics --metric-name NumberOfCalls (doit être raisonnable, pas 1000s/sec)",
+            "Load test: encrypt 1000 messages, measure latency (avec caching < 10ms, sans caching > 100ms)",
+            "Vérifier cache configuration: max_age < 3600 sec (security), max_messages < 10000 (compliance)"
+        ],
+        references=[
+            "https://docs.aws.amazon.com/encryption-sdk/latest/developer-guide/data-key-caching.html",
+            "https://docs.aws.amazon.com/kms/latest/developerguide/concepts.html#enveloping",
+            "https://github.com/aws/aws-encryption-sdk-python"
+        ]
     )
 ]
 
@@ -9223,6 +9479,112 @@ CONTAINER_QUESTIONS = [
         remediation=["kubectl create role/rolebinding", "Pod Security admission: restricted", "kubectl apply network-policy"],
         verification_steps=["kubectl get rolebindings --all-namespaces", "kubectl get psp ou admission config", "kubectl get networkpolicies"],
         references=["https://kubernetes.io/docs/concepts/security/rbac-good-practices/"]
+    ),
+
+    Question(
+        id="CONTAINER-004",
+        question="CloudWatch Container Insights activé et logging structuré (FluentBit/Fluent) pour observabilité complète?",
+        description="Vérifier Container Insights pour métriques performance (CPU, memory, network) et logging centralisé avec parsing JSON",
+        severity="HIGH",
+        category="Containers",
+        compliance=["Observability", "Performance Monitoring", "Troubleshooting"],
+        technical_details="Container Insights = métriques + logs containers. ECS: FireLens (FluentBit) route logs vers CloudWatch/S3/Elasticsearch. EKS: FluentBit DaemonSet parse JSON logs. Métriques: task/pod CPU%, memory%, network bytes. Use cases: identify resource hogs, troubleshoot OOMKilled, correlate logs avec metrics",
+        remediation=[
+            "1. ECS Container Insights: aws ecs put-account-setting --name containerInsights --value enabled",
+            "2. EKS Container Insights: kubectl apply -f https://raw.githubusercontent.com/aws-samples/amazon-cloudwatch-container-insights/latest/k8s-deployment/cloudwatch-namespace.yaml",
+            "3. ECS FireLens logging: logConfiguration {logDriver: awsfirelens, options: {Name: cloudwatch, region: us-east-1, log_group_name: /ecs/app}}",
+            "4. EKS FluentBit DaemonSet: helm install aws-for-fluent-bit eks/aws-for-fluent-bit --set cloudWatch.enabled=true",
+            "5. Structured logging app: import logging; logging.info(json.dumps({\"event\":\"request\", \"latency_ms\":120, \"status\":200}))",
+            "6. CloudWatch Logs Insights query: fields @timestamp, status, latency_ms | filter status >= 500 | stats avg(latency_ms)"
+        ],
+        verification_steps=[
+            "ECS: aws ecs describe-clusters --include SETTINGS --query 'clusters[].settings'",
+            "EKS: kubectl get pods -n amazon-cloudwatch (FluentBit DaemonSet running)",
+            "CloudWatch Console > Container Insights (vérifier métriques CPU/memory par service)",
+            "Logs Insights query: fields @timestamp, @message | filter @logStream like /container/ | limit 20",
+            "Test OOMKilled detection: deploy pod avec memory limit bas, vérifier alarme CloudWatch"
+        ],
+        references=[
+            "https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/ContainerInsights.html",
+            "https://docs.aws.amazon.com/AmazonECS/latest/developerguide/using_firelens.html",
+            "https://docs.aws.amazon.com/eks/latest/userguide/fargate-logging.html"
+        ]
+    ),
+
+    Question(
+        id="CONTAINER-005",
+        question="Security context pods/tasks configuré: runAsNonRoot, readOnlyRootFilesystem, drop ALL capabilities?",
+        description="Vérifier containers run as non-root user, filesystem read-only, et Linux capabilities minimales (least privilege)",
+        severity="HIGH",
+        category="Containers",
+        compliance=["Least Privilege", "Container Hardening", "Defense in Depth"],
+        technical_details="Security context = runtime constraints. runAsNonRoot: empêche UID 0 (root breakout attacks). readOnlyRootFilesystem: immutable container (empêche malware write). Capabilities: drop ALL puis add specific (NET_BIND_SERVICE si port < 1024). ECS: user parameter dans task definition. EKS: securityContext dans pod spec. Best practice: non-root user + read-only FS + no privileged mode",
+        remediation=[
+            "1. ECS task definition security:",
+            "   {\"user\": \"1000:1000\", \"readonlyRootFilesystem\": true, \"privileged\": false}",
+            "2. EKS pod securityContext:",
+            "   securityContext:",
+            "     runAsNonRoot: true",
+            "     runAsUser: 1000",
+            "     fsGroup: 1000",
+            "     readOnlyRootFilesystem: true",
+            "     allowPrivilegeEscalation: false",
+            "     capabilities:",
+            "       drop: [\"ALL\"]",
+            "       add: [\"NET_BIND_SERVICE\"]  # si port < 1024",
+            "3. Dockerfile best practice: USER 1000 (pas root)",
+            "4. Test read-only FS: docker run --read-only image (app doit fonctionner)",
+            "5. OPA/Gatekeeper policy EKS: enforce runAsNonRoot obligatoire tous namespaces"
+        ],
+        verification_steps=[
+            "ECS: aws ecs describe-task-definition --task-definition app --query 'taskDefinition.containerDefinitions[].{User:user,ReadOnly:readonlyRootFilesystem,Privileged:privileged}'",
+            "EKS: kubectl get pods -o json | jq '.items[].spec.securityContext'",
+            "Test running as root: kubectl exec pod -- whoami (ne doit PAS retourner 'root')",
+            "Test read-only FS: kubectl exec pod -- touch /test.txt (doit échouer: Read-only file system)",
+            "Audit privileged containers: kubectl get pods -o json | jq '.items[] | select(.spec.containers[].securityContext.privileged==true)'",
+            "OPA constraint violations: kubectl get constraints"
+        ],
+        references=[
+            "https://kubernetes.io/docs/tasks/configure-pod-container/security-context/",
+            "https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task_definition_parameters.html#container_definitions",
+            "https://cheatsheetseries.owasp.org/cheatsheets/Docker_Security_Cheat_Sheet.html"
+        ]
+    ),
+
+    Question(
+        id="CONTAINER-006",
+        question="Service Mesh (App Mesh, Istio) déployé pour mTLS automatic entre microservices et traffic policies?",
+        description="Vérifier service mesh pour encryption mTLS automatic service-to-service, traffic routing, et circuit breakers",
+        severity="MEDIUM",
+        category="Containers",
+        compliance=["Zero Trust", "Microservices Security", "Encryption in Transit"],
+        technical_details="Service Mesh = infrastructure layer pour service-to-service communication. AWS App Mesh: managed Envoy proxy sidecars. Istio: open-source mesh avec pilot/citadel. Features: mTLS automatic (pas besoin app code), traffic routing (canary, A/B), circuit breakers (fault tolerance), observability (distributed tracing). mTLS: each service gets certificate, mutual authentication, encrypted traffic between pods/tasks",
+        remediation=[
+            "1. EKS + Istio installation: istioctl install --set profile=default",
+            "2. Enable mTLS strict mode namespace: kubectl apply -f - <<EOF",
+            "   apiVersion: security.istio.io/v1beta1",
+            "   kind: PeerAuthentication",
+            "   metadata: {name: default, namespace: production}",
+            "   spec: {mtls: {mode: STRICT}}",
+            "   EOF",
+            "3. ECS + App Mesh: aws appmesh create-mesh --mesh-name production-mesh",
+            "4. Virtual node avec mTLS: aws appmesh create-virtual-node --mesh-name production-mesh --spec listeners[0].tls.mode=STRICT",
+            "5. Traffic policy (canary 10%): VirtualService routeAction weightedTargets: [{virtualNode: v1, weight: 90}, {virtualNode: v2, weight: 10}]",
+            "6. Circuit breaker: outlierDetection {consecutiveErrors: 5, interval: 30s, baseEjectionTime: 30s}"
+        ],
+        verification_steps=[
+            "Istio: kubectl get peerauthentication -A (vérifier mode STRICT)",
+            "Test mTLS: kubectl exec pod -c istio-proxy -- curl http://service:8080 (doit fonctionner via mTLS)",
+            "Vérifier certificates: istioctl proxy-config secret pod.namespace (list client/server certs)",
+            "App Mesh: aws appmesh describe-virtual-node --mesh-name production --virtual-node-name api --query 'virtualNode.spec.listeners[].tls'",
+            "Test traffic split: curl service (50% requests → v1, 50% → v2)",
+            "Distributed tracing: kubectl port-forward svc/jaeger-query 16686 puis open http://localhost:16686 (visualize trace)"
+        ],
+        references=[
+            "https://docs.aws.amazon.com/app-mesh/latest/userguide/mutual-tls.html",
+            "https://istio.io/latest/docs/tasks/security/authentication/mtls-migration/",
+            "https://aws.amazon.com/blogs/containers/getting-started-with-app-mesh-and-eks/"
+        ]
     )
 ]
 
