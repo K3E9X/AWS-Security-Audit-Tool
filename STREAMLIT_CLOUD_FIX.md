@@ -40,7 +40,7 @@ Si Option 1 ne marche pas:
 # 3. Cliquer "New app"
 
 # 4. Configurer:
-Repository: K3E9X/Machine71
+Repository: K3E9X/AWS-Security-Audit-Tool (ou K3E9X/Machine71)
 Branch: main
 Main file path: app.py
 App URL: aws-security-audit-tool (ou custom)

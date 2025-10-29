@@ -60,7 +60,7 @@ streamlit-agraph==0.0.45
 
 Dans Streamlit Cloud:
 
-1. **Repository**: `K3E9X/Machine71`
+1. **Repository**: `K3E9X/AWS-Security-Audit-Tool` (ou `K3E9X/Machine71`)
 2. **Branch**: `main` (ou votre branche de production)
 3. **Main file path**: `app.py`
 4. **Python version**: **3.11** (RECOMMANDÉ) ou 3.10
@@ -165,7 +165,7 @@ Avant de déployer, vérifier:
 ## 🎯 Configuration Recommandée Streamlit Cloud
 
 ```
-Repository: K3E9X/Machine71
+Repository: K3E9X/AWS-Security-Audit-Tool (ou K3E9X/Machine71)
 Branch: main
 Main file: app.py
 Python version: 3.11
