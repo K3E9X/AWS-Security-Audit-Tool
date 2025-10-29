@@ -1,0 +1,28 @@
+# Configuration minimale pour macOS avec Python 3.14+
+# Évite les packages qui nécessitent compilation (pyarrow)
+
+# Core Streamlit (version sans pyarrow si possible)
+streamlit>=1.32.0
+plotly>=5.20.0
+
+# Data manipulation - versions compatibles
+pandas>=2.2.0
+numpy>=1.26.0
+
+# Validation
+pydantic>=2.6.0
+python-dotenv>=1.0.0
+
+# Export et documentation
+markdown>=3.5.0
+reportlab>=4.1.0
+Pillow>=10.2.0
+
+# Composants Streamlit - versions minimales
+streamlit-drawable-canvas>=0.9.3
+streamlit-agraph>=0.0.45
+
+# Note: Si streamlit insiste sur pyarrow, utilisez l'une des solutions suivantes:
+# 1. Installer cmake: brew install cmake apache-arrow
+# 2. Utiliser Python 3.11: brew install python@3.11
+# 3. Utiliser conda: conda install -c conda-forge pyarrow

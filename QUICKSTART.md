@@ -12,6 +12,8 @@
 ./run-macos.sh
 ```
 
+**⚠️ Erreur avec Python 3.14 ?** Consulte [FIX_PYTHON_314.md](FIX_PYTHON_314.md)
+
 ### 🪟 Windows
 ```powershell
 python -m venv venv
@@ -22,10 +24,12 @@ streamlit run app.py
 
 ## ⚠️ Problèmes Courants
 
-### macOS: Erreur de compilation numpy
-**Symptôme**: `error: metadata-generation-failed` ou erreurs `typedef redefinition`
+### macOS: Erreur de compilation numpy/pyarrow
+**Symptôme**: `error: metadata-generation-failed` ou `cmake failed` ou `typedef redefinition`
 
-**Solution**: Utiliser `./run-macos.sh` ou consulter [README_MACOS.md](README_MACOS.md)
+**Solution rapide**:
+- Python 3.14: Voir [FIX_PYTHON_314.md](FIX_PYTHON_314.md) ⚡
+- Autres versions: Utiliser `./run-macos.sh` ou consulter [README_MACOS.md](README_MACOS.md)
 
 ### Linux: Module not found
 **Symptôme**: `ModuleNotFoundError: No module named 'streamlit'`
