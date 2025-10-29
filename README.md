@@ -4,16 +4,19 @@
 
 A modern, professional security audit tool designed for security consultants and auditors conducting client workshops and AWS infrastructure assessments.
 
+🌐 **[Try Live Demo on Streamlit Cloud](https://aws-security-audit-tool.streamlit.app)**
+
 ## Overview
 
 This tool provides an interactive web interface for conducting thorough AWS security audits with:
 
-- **150+ advanced technical questions** covering critical AWS services
+- **100 advanced technical questions** covering critical AWS services
 - **Interactive checklist** with real-time progress tracking
 - **Architecture diagram editor** to visualize client infrastructure
 - **Session management** to save and resume audits
 - **Professional report generation** (Markdown & PDF)
-- **Compliance mapping** (ISO 27001, SOC2, PCI-DSS, HIPAA, GDPR, CIS Benchmark)
+- **Compliance mapping** (ISO 27001, SOC2, PCI-DSS, HIPAA, GDPR, CIS Benchmark, NIST)
+- **Cloud deployment** - Live on Streamlit Cloud
 
 ## Features
 
@@ -59,6 +62,18 @@ This tool provides an interactive web interface for conducting thorough AWS secu
 - Load balancer configurations
 - WAF rules and protection
 
+#### Monitoring & Logging
+- CloudTrail audit logging
+- CloudWatch monitoring and alarms
+- Log integrity validation
+- Security event analysis
+
+#### Additional Services
+- KMS key management and encryption
+- Route53 DNS security
+- CloudFormation IaC security
+- Multi-service integration and compliance
+
 ### Architecture Diagram Editor
 
 - Visual diagram builder for documenting client infrastructure
@@ -92,15 +107,44 @@ Export formats:
 
 ### Prerequisites
 
-- Python 3.8 or higher
+- Python 3.9 to 3.13 (recommended: **3.11**)
 - pip package manager
 
-### Setup
+### Quick Start
+
+#### Try Online (No Installation)
+Visit **[https://aws-security-audit-tool.streamlit.app](https://aws-security-audit-tool.streamlit.app)** - ready to use immediately!
+
+#### Run Locally - Linux
+```bash
+git clone https://github.com/K3E9X/AWS-Security-Audit-Tool.git
+cd AWS-Security-Audit-Tool
+./run.sh
+```
+
+#### Run Locally - macOS
+```bash
+git clone https://github.com/K3E9X/AWS-Security-Audit-Tool.git
+cd AWS-Security-Audit-Tool
+./run-macos.sh
+```
+
+#### Run Locally - Windows
+```bash
+git clone https://github.com/K3E9X/AWS-Security-Audit-Tool.git
+cd AWS-Security-Audit-Tool
+python -m venv venv
+venv\Scripts\activate
+pip install -r requirements.txt
+streamlit run app.py
+```
+
+### Standard Installation
 
 ```bash
 # Clone the repository
-git clone https://github.com/K3E9X/Machine71.git
-cd Machine71
+git clone https://github.com/K3E9X/AWS-Security-Audit-Tool.git
+cd AWS-Security-Audit-Tool
 
 # Create virtual environment
 python3 -m venv venv
@@ -114,6 +158,19 @@ venv\Scripts\activate
 # Install dependencies
 pip install -r requirements.txt
 ```
+
+### Platform-Specific Notes
+
+**macOS Users**: If you encounter compilation errors with numpy/pandas, use:
+```bash
+pip install -r requirements-macos.txt
+```
+
+**Python 3.14 Users**: See [FIX_PYTHON_314.md](FIX_PYTHON_314.md) for compatibility solutions.
+
+For detailed installation instructions, see:
+- [README_INSTALLATION.md](README_INSTALLATION.md) - Complete installation guide
+- [README_MACOS.md](README_MACOS.md) - macOS-specific guide
 
 ## Usage
 
@@ -129,11 +186,11 @@ The application will open automatically in your default browser at `http://local
 
 1. **Start from Dashboard**
    - View overall statistics and progress
-   - Understand the scope of the audit
+   - Understand the scope of the audit (100 questions)
 
 2. **Select Service Category**
    - Use sidebar navigation to select AWS service
-   - Available: IAM, VPC, EC2, S3, RDS, Lambda, API Gateway
+   - Available: IAM, VPC, EC2, S3, RDS, Lambda, API Gateway, CloudTrail, CloudFormation, CloudWatch, CloudFront, KMS, Containers, Route53
 
 3. **Answer Questions**
    - Read technical details and verification steps
@@ -166,56 +223,86 @@ Click "Load Session" in sidebar
 # Sessions are stored in: sessions/audit_session_YYYYMMDD_HHMMSS.json
 ```
 
+## Deployment
+
+### Streamlit Cloud (Production)
+
+The application is live on Streamlit Cloud:
+
+**Live URL:** https://aws-security-audit-tool.streamlit.app
+
+#### Deploy Your Own Instance
+
+1. Fork this repository on GitHub
+2. Go to [share.streamlit.io](https://share.streamlit.io/)
+3. Connect your GitHub account
+4. Deploy with these settings:
+   - Repository: `your-username/AWS-Security-Audit-Tool`
+   - Branch: `main`
+   - Main file: `app.py`
+   - **Python version: 3.11** (important!)
+5. Click Deploy!
+
+For detailed deployment instructions, see [DEPLOYMENT_STREAMLIT_CLOUD.md](DEPLOYMENT_STREAMLIT_CLOUD.md)
+
+### Local Deployment
+
+See [Installation](#installation) section above.
+
 ## Project Structure
 
 ```
-Machine71/
-├── app.py                          # Main Streamlit application
-├── requirements.txt                # Python dependencies
+AWS-Security-Audit-Tool/
+├── app.py                              # Main Streamlit application
+├── requirements.txt                    # Python dependencies (Streamlit Cloud)
+├── requirements-macos.txt              # macOS-optimized dependencies
+├── requirements-cloud.txt              # Alternative Cloud dependencies
+├── packages.txt                        # System packages
+├── .streamlit/
+│   ├── config.toml                     # Streamlit configuration
+│   └── secrets.toml                    # Secrets template
 ├── data/
 │   ├── __init__.py
-│   ├── aws_services_questions.py   # Comprehensive question database
-│   └── diagrams/                   # Saved architecture diagrams
+│   ├── aws_services_questions.py       # 100 security questions database
+│   └── diagrams/                       # Saved architecture diagrams
 ├── utils/
 │   ├── __init__.py
-│   ├── session.py                  # Audit session management
-│   ├── export.py                   # Report generation (MD/PDF)
-│   └── diagram.py                  # Architecture diagram editor
-├── sessions/                       # Saved audit sessions
-├── reports/                        # Generated reports
-└── README.md                       # This file
+│   ├── session.py                      # Audit session management
+│   ├── export.py                       # Report generation (MD/PDF)
+│   └── diagram.py                      # Architecture diagram editor
+├── sessions/                           # Saved audit sessions
+├── reports/                            # Generated reports
+├── run.sh                              # Linux launch script
+├── run-macos.sh                        # macOS launch script
+├── diagnose-macos.sh                   # macOS diagnostic tool
+├── README.md                           # This file
+├── README_INSTALLATION.md              # Installation guide
+├── README_MACOS.md                     # macOS guide
+├── FIX_PYTHON_314.md                   # Python 3.14 compatibility
+├── DEPLOYMENT_STREAMLIT_CLOUD.md       # Cloud deployment guide
+├── STREAMLIT_CLOUD_FIX.md              # Cloud troubleshooting
+└── QUICKSTART.md                       # Quick start guide
 ```
 
 ## Question Categories
 
-### IAM Security (7+ questions)
-- Password policies and complexity
-- MFA enforcement strategies
-- Least privilege principle implementation
-- Access key rotation policies
-- IAM roles vs users for applications
-- AssumeRole trust policies and External ID
-- Service Control Policies (SCPs)
+### Coverage by Service (100 Total Questions)
 
-### VPC & Network Security (7+ questions)
-- VPC architecture and isolation
-- Security Groups best practices
-- VPC Flow Logs configuration
-- Network ACLs implementation
-- VPC Endpoints usage
-- AWS PrivateLink deployment
-- Network Firewall inspection
-
-### Additional Services
-More questions available for:
-- EC2 & Compute
-- S3 & Storage
-- RDS & Databases
-- Lambda & Serverless
-- API Gateway
-- CloudFront & CDN
-- CloudTrail & Logging
-- KMS & Encryption
+- **IAM Security** (7 questions) - Password policies, MFA, least privilege, access key rotation, roles, SCPs
+- **VPC & Network Security** (7 questions) - Architecture, Security Groups, Flow Logs, NACLs, Endpoints, PrivateLink, Network Firewall
+- **EC2 & Compute** (7 questions) - IMDSv2, EBS encryption, instance profiles, security groups, SSH keys, Systems Manager, patching
+- **S3 & Storage** (7 questions) - Bucket policies, encryption, versioning, Object Lock, access logging, public access prevention
+- **RDS & Databases** (7 questions) - Encryption, network isolation, backups, Multi-AZ, parameter groups, audit logging
+- **Lambda & Serverless** (7 questions) - Function security, VPC config, secrets management
+- **API Gateway** (7 questions) - Authentication, throttling, WAF integration, logging
+- **CloudTrail** (7 questions) - Audit logging, integrity validation, multi-region trails
+- **CloudFormation** (7 questions) - IaC security, drift detection, stack policies
+- **CloudWatch** (7 questions) - Monitoring, alarms, metrics, log analysis
+- **CloudFront** (7 questions) - CDN security, HTTPS enforcement, geo-restrictions, WAF
+- **KMS & Encryption** (7 questions) - Key policies, rotation, multi-region keys
+- **Containers (ECS/EKS)** (7 questions) - Image scanning, secrets management, network policies
+- **Route53** (7 questions) - DNS security, DNSSEC, health checks, routing policies
+- **Multi-Service** (7 questions) - Tagging, monitoring, incident response, compliance
 
 ## Compliance Frameworks
 
@@ -252,32 +339,47 @@ Each question includes:
 ```python
 Question(
     id="IAM-002",
-    question="MFA obligatoire pour tous les utilisateurs privilégiés?",
-    description="Vérification que l'authentification multi-facteurs...",
+    question="Is MFA enforced for all privileged users?",
+    description="Verify multi-factor authentication is enabled...",
     severity="CRITICAL",
     category="IAM",
     compliance=["ISO 27001", "SOC2", "PCI-DSS", "HIPAA"],
     technical_details="""
-    Types de MFA acceptables:
+    Acceptable MFA types:
     - Hardware MFA: YubiKey, Gemalto
     - Virtual MFA: Google Authenticator, Authy
-    ...
+    - U2F security keys
+
+    MFA should be enforced via:
+    - IAM policies with MFA conditions
+    - SCP policies at organization level
     """,
     remediation=[
-        "Root account: IAM Dashboard > Security credentials > MFA",
-        "Créer une policy IAM conditionnelle exigeant MFA",
-        ...
+        "Enable MFA for root account via IAM Dashboard",
+        "Create IAM policy requiring MFA for privileged operations",
+        "Implement SCP to enforce MFA organization-wide"
     ],
     verification_steps=[
         "aws iam get-credential-report",
-        "grep -v 'mfa_active.*true' report.csv",
-        ...
+        "aws iam list-virtual-mfa-devices",
+        "aws iam list-users --query 'Users[?not_null(MfaDevices)]'"
     ],
     references=[
-        "https://docs.aws.amazon.com/IAM/latest/UserGuide/id_credentials_mfa.html"
+        "https://docs.aws.amazon.com/IAM/latest/UserGuide/id_credentials_mfa.html",
+        "https://docs.aws.amazon.com/organizations/latest/userguide/orgs_manage_policies_scps.html"
     ]
 )
 ```
+
+### Technology Stack
+
+- **Frontend:** Streamlit 1.32.2
+- **Data Visualization:** Plotly 5.20.0
+- **Data Processing:** Pandas 2.2.0, NumPy 1.26.4
+- **Validation:** Pydantic 2.6.3
+- **Report Generation:** ReportLab 4.1.0, Markdown 3.5.2
+- **Diagram Editor:** Streamlit-agraph 0.0.45
+- **Python:** 3.11+ (tested on 3.9-3.13)
 
 ## Use Cases
 
@@ -299,16 +401,11 @@ Question(
 - Security baseline verification
 - Continuous compliance monitoring
 
-## Development Roadmap
-
-- [ ] Add 100+ more questions for remaining AWS services
-- [ ] CloudFormation/Terraform integration for automated checks
-- [ ] Multi-language support (English, Spanish, German)
-- [ ] Integration with AWS Security Hub
-- [ ] Automated scanning capabilities
-- [ ] Custom question templates
-- [ ] Team collaboration features
-- [ ] API for CI/CD integration
+### Cloud Architects
+- Security architecture review
+- Best practices validation
+- Risk assessment and mitigation
+- Knowledge base for security patterns
 
 ## Contributing
 
@@ -319,7 +416,11 @@ Contributions are welcome! To add new questions:
 3. Include comprehensive technical details
 4. Add CLI verification commands
 5. Link to official AWS documentation
-6. Test the question in the interface
+6. Map to relevant compliance frameworks
+7. Test the question in the interface
+
+For issues, questions, or feature requests:
+- GitHub Issues: https://github.com/K3E9X/AWS-Security-Audit-Tool/issues
 
 ## Best Practices
 
@@ -355,7 +456,7 @@ Contributions are welcome! To add new questions:
 
 ```bash
 # Check Python version
-python --version  # Should be 3.8+
+python --version  # Should be 3.9-3.13 (recommend 3.11)
 
 # Reinstall dependencies
 pip install -r requirements.txt --force-reinstall
@@ -364,6 +465,22 @@ pip install -r requirements.txt --force-reinstall
 streamlit cache clear
 ```
 
+### macOS compilation errors
+
+```bash
+# Use macOS-optimized requirements
+pip install -r requirements-macos.txt
+
+# Or run diagnostic
+./diagnose-macos.sh
+```
+
+See [README_MACOS.md](README_MACOS.md) for detailed troubleshooting.
+
+### Python 3.14 compatibility
+
+Python 3.14 may have compatibility issues with pyarrow. See [FIX_PYTHON_314.md](FIX_PYTHON_314.md) for solutions.
+
 ### Port already in use
 
 ```bash
@@ -371,12 +488,20 @@ streamlit cache clear
 streamlit run app.py --server.port 8502
 ```
 
-### PDF export not working
+### Streamlit Cloud deployment
 
-```bash
-# Install reportlab separately
-pip install reportlab
-```
+See [STREAMLIT_CLOUD_FIX.md](STREAMLIT_CLOUD_FIX.md) for common deployment problems and solutions.
+
+## Documentation
+
+Comprehensive documentation available:
+
+- **[QUICKSTART.md](QUICKSTART.md)** - Quick start guide for all platforms
+- **[README_INSTALLATION.md](README_INSTALLATION.md)** - Complete installation guide
+- **[README_MACOS.md](README_MACOS.md)** - macOS-specific installation and troubleshooting
+- **[FIX_PYTHON_314.md](FIX_PYTHON_314.md)** - Python 3.14 compatibility solutions
+- **[DEPLOYMENT_STREAMLIT_CLOUD.md](DEPLOYMENT_STREAMLIT_CLOUD.md)** - Streamlit Cloud deployment guide
+- **[STREAMLIT_CLOUD_FIX.md](STREAMLIT_CLOUD_FIX.md)** - Streamlit Cloud troubleshooting
 
 ## License
 
@@ -384,19 +509,37 @@ MIT License - See LICENSE file for details
 
 ## Support
 
-For issues, questions, or contributions:
-- GitHub Issues: https://github.com/K3E9X/Machine71/issues
-- Documentation: See docs/ folder for detailed guides
+- **Live Demo:** https://aws-security-audit-tool.streamlit.app
+- **GitHub Issues:** https://github.com/K3E9X/AWS-Security-Audit-Tool/issues
+- **Documentation:** See docs listed above
 
 ## Acknowledgments
 
 - AWS Security Best Practices documentation
 - CIS AWS Foundations Benchmark
-- AWS Well-Architected Framework
-- Security community contributions
+- AWS Well-Architected Framework - Security Pillar
+- Streamlit for the amazing framework
+- Security community contributions and feedback
 
 ---
 
 **Built for security professionals, by security professionals**
 
-*Professional AWS security auditing made simple and effective*
+*Professional AWS security auditing made simple, comprehensive, and effective*
+
+---
+
+## Statistics
+
+- **100 Security Questions** covering 15 AWS services
+- **8 Compliance Frameworks** mapped
+- **Multi-platform Support** (Linux, macOS, Windows)
+- **Cloud Deployed** on Streamlit Cloud
+- **Open Source** with MIT License
+- **Production Ready** with comprehensive documentation
+
+---
+
+**Ready to conduct your first AWS security audit?**
+
+👉 **[Start Now on Streamlit Cloud](https://aws-security-audit-tool.streamlit.app)** 🚀
