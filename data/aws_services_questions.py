@@ -7756,6 +7756,553 @@ CLOUDFORMATION_QUESTIONS = [
         remediation=["aws cloudformation create-change-set", "Review avant execute-change-set", "create-stack-set pour multi-account"],
         verification_steps=["Vérifier CI/CD utilise change-set", "aws cloudformation list-stack-sets", "describe-stack-set-operation"],
         references=["https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/using-cfn-updating-stacks-changesets.html"]
+    ),
+
+    Question(
+        id="CFN-004",
+        question="CloudFormation Guard ou cfn-nag intégré au CI/CD pour policy-as-code validation avant déploiement?",
+        description="Vérifier validation automatique templates CloudFormation contre règles sécurité (Guard rules) avant création stacks",
+        severity="HIGH",
+        category="CloudFormation",
+        compliance=["Policy as Code", "Shift-Left Security", "CIS Benchmark"],
+        technical_details="""
+        CloudFormation Guard = outil policy-as-code pour valider templates IaC
+
+        Fonctionnement:
+        - Règles Guard écrites en DSL déclaratif
+        - Validation templates avant déploiement (shift-left)
+        - Détecte non-compliance: S3 buckets public, SGs ouverts 0.0.0.0/0, etc.
+        - Intégration CI/CD: bloque merge si template non-compliant
+
+        Alternatives:
+        - cfn-nag: Ruby-based linter pour CloudFormation (gratuit, open-source)
+        - Checkov: multi-cloud policy scanner (Terraform, CFN, etc.)
+
+        Use cases:
+        1. Bloquer S3 buckets sans encryption
+        2. Enforcement IAM least privilege
+        3. Vérifier logging activé (CloudTrail, VPC Flow Logs)
+        4. Interdire IMDSv1 sur EC2
+
+        Compliance:
+        - CIS AWS Foundations Benchmark automated checks
+        - PCI-DSS: encryption validation
+        - HIPAA: audit logging validation
+        """,
+        remediation=[
+            "1. Installer CloudFormation Guard:",
+            "   cargo install cfn-guard  # Rust-based CLI",
+            "   # Ou télécharger binaire depuis GitHub releases",
+            "",
+            "2. Créer règles Guard pour policies sécurité (example: S3 encryption):",
+            "   Créer fichier s3-encryption.guard:",
+            """   # S3 buckets must have encryption enabled
+   let s3_buckets = Resources.*[ Type == 'AWS::S3::Bucket' ]
+   rule s3_encryption_enabled {
+       %s3_buckets.Properties.BucketEncryption exists
+       %s3_buckets.Properties.BucketEncryption.ServerSideEncryptionConfiguration[*].ServerSideEncryptionByDefault.SSEAlgorithm in ['AES256', 'aws:kms']
+   }""",
+            "",
+            "3. Créer règles pour Security Groups (pas 0.0.0.0/0):",
+            "   Créer fichier sg-no-public.guard:",
+            """   # Security Groups must not allow unrestricted access
+   let security_groups = Resources.*[ Type == 'AWS::EC2::SecurityGroup' ]
+   rule sg_no_unrestricted_ingress {
+       %security_groups.Properties.SecurityGroupIngress[*].CidrIp != '0.0.0.0/0'
+       %security_groups.Properties.SecurityGroupIngress[*].CidrIpv6 != '::/0'
+   }""",
+            "",
+            "4. Valider template CloudFormation contre règles:",
+            "   cfn-guard validate \\",
+            "     --data template.yaml \\",
+            "     --rules s3-encryption.guard sg-no-public.guard",
+            "",
+            "5. Intégrer Guard dans CI/CD pipeline (exemple GitHub Actions):",
+            "   Créer .github/workflows/cfn-validation.yml:",
+            """   name: CloudFormation Validation
+   on: [pull_request]
+   jobs:
+     validate:
+       runs-on: ubuntu-latest
+       steps:
+         - uses: actions/checkout@v3
+         - name: Install cfn-guard
+           run: cargo install cfn-guard
+         - name: Validate templates
+           run: |
+             find . -name '*.yaml' -o -name '*.yml' | while read template; do
+               cfn-guard validate --data $template --rules guard-rules/
+             done""",
+            "",
+            "6. Alternative: Utiliser cfn-nag pour scanning:",
+            "   gem install cfn-nag",
+            "   cfn_nag_scan --input-path templates/",
+            "",
+            "7. Créer règle Guard pour IAM policies (least privilege):",
+            "   Créer fichier iam-least-privilege.guard:",
+            """   # IAM policies must not allow wildcard actions on wildcard resources
+   let iam_policies = Resources.*[ Type == 'AWS::IAM::Policy' ]
+   rule iam_no_wildcard_action_and_resource {
+       when %iam_policies exists {
+           %iam_policies.Properties.PolicyDocument.Statement[*] {
+               when Action == '*' {
+                   Resource != '*'
+               }
+           }
+       }
+   }""",
+            "",
+            "8. Activer CloudFormation Hooks (managed rules AWS):",
+            "   # CloudFormation Hooks = validation automatique par AWS",
+            "   aws cloudformation set-type-configuration \\",
+            "     --type HOOK \\",
+            "     --type-name AWS::CloudFormation::Hook \\",
+            "     --configuration-alias default \\",
+            "     --configuration '{\"CloudFormationConfiguration\":{\"HookConfiguration\":{\"TargetStacks\":\"ALL\",\"FailureMode\":\"FAIL\"}}}'",
+            "",
+            "9. Créer règle Guard pour encryption at rest (toutes ressources):",
+            "   Créer fichier encryption-at-rest.guard:",
+            """   # All data stores must have encryption at rest
+   let rds_instances = Resources.*[ Type == 'AWS::RDS::DBInstance' ]
+   rule rds_encryption_enabled {
+       %rds_instances.Properties.StorageEncrypted == true
+   }
+
+   let dynamodb_tables = Resources.*[ Type == 'AWS::DynamoDB::Table' ]
+   rule dynamodb_encryption_enabled {
+       %dynamodb_tables.Properties.SSESpecification.SSEEnabled == true
+   }""",
+            "",
+            "10. Scan repository pour toutes templates CloudFormation:",
+            "    find . -type f \\( -name '*.yaml' -o -name '*.yml' -o -name '*.json' \\) -exec grep -l 'AWSTemplateFormatVersion' {} \\; | \\",
+            "      xargs -I {} cfn-guard validate --data {} --rules guard-rules/"
+        ],
+        verification_steps=[
+            "1. Vérifier cfn-guard ou cfn-nag installé dans CI/CD:",
+            "   which cfn-guard  # Doit retourner path",
+            "   cfn-guard --version",
+            "",
+            "2. Lister règles Guard configurées:",
+            "   ls -la guard-rules/  # Doit contenir .guard files",
+            "",
+            "3. Tester validation sur template non-compliant:",
+            "   # Créer template avec S3 bucket sans encryption",
+            "   cfn-guard validate --data bad-template.yaml --rules s3-encryption.guard",
+            "   # Doit échouer avec message clair",
+            "",
+            "4. Vérifier intégration CI/CD (GitHub Actions, GitLab CI, etc.):",
+            "   # Check workflow files contiennent cfn-guard validate",
+            "   grep -r 'cfn-guard' .github/workflows/",
+            "",
+            "5. Tester cfn-nag scan sur tous templates:",
+            "   cfn_nag_scan --input-path cloudformation/ --output-format json",
+            "",
+            "6. Vérifier CloudFormation Hooks activés (managed rules AWS):",
+            "   aws cloudformation list-types \\",
+            "     --type HOOK \\",
+            "     --visibility PUBLIC \\",
+            "     --provisioning-type FULLY_MUTABLE",
+            "",
+            "7. Auditer historique déploiements bloqués par Guard:",
+            "   # Dans CI/CD logs, chercher failed validation",
+            "   # Confirmer aucun template non-compliant déployé",
+            "",
+            "8. Créer test case pour vérifier Guard rules fonctionnent:",
+            "   # Template test avec volontaire non-compliance",
+            "   # Vérifier Guard détecte et bloque",
+            "",
+            "9. Vérifier règles Guard couvrent tous services critiques:",
+            "   ls guard-rules/*.guard",
+            "   # Doit inclure: S3, EC2, RDS, IAM, Lambda, etc.",
+            "",
+            "10. Benchmark Guard rules contre CIS AWS Foundations:",
+            "    # Vérifier toutes contrôles CIS Level 1 sont couverts",
+            "    # https://aws.amazon.com/quickstart/architecture/compliance-cis-benchmark/"
+        ],
+        references=[
+            "https://github.com/aws-cloudformation/cloudformation-guard",
+            "https://docs.aws.amazon.com/cfn-guard/latest/ug/what-is-guard.html",
+            "https://github.com/stelligent/cfn_nag",
+            "https://www.checkov.io/",
+            "https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/hooks.html"
+        ]
+    ),
+
+    Question(
+        id="CFN-005",
+        question="Rollback configuration avec CloudWatch alarms monitoring, termination protection activée sur stacks critiques?",
+        description="Vérifier auto-rollback basé alarmes CloudWatch + termination protection empêchant suppressions accidentelles",
+        severity="HIGH",
+        category="CloudFormation",
+        compliance=["Business Continuity", "High Availability", "Change Management"],
+        technical_details="""
+        CloudFormation Rollback Configuration = automatic rollback si déploiement échoue
+
+        Mécanismes de protection:
+        1. Rollback Triggers (CloudWatch Alarms):
+           - Monitor métriques pendant/après déploiement
+           - Auto-rollback si alarm triggered (erreurs, latency spike, etc.)
+           - Exemple: Lambda errors > 10, ALB 5xx errors > threshold
+
+        2. Monitoring Period:
+           - Durée monitoring après déploiement (0-180 min)
+           - Alarm pendant monitoring → rollback automatique
+
+        3. Termination Protection:
+           - Empêche stack deletion accidentelle (production stacks)
+           - Requiert disable termination protection avant delete
+
+        4. Stack Notification (SNS):
+           - Alertes sur stack events (CREATE, UPDATE, DELETE, ROLLBACK)
+           - Intégration Slack/PagerDuty via SNS
+
+        Cas d'usage:
+        - Production deployments avec zero-downtime requirement
+        - Blue/Green avec validation automatique (rollback si errors)
+        - Critical infrastructure (VPC, IAM, databases)
+
+        Compliance:
+        - ITIL Change Management: automated rollback
+        - HA requirements: minimize impact failed deployments
+        """,
+        remediation=[
+            "1. Lister stacks sans termination protection:",
+            "   aws cloudformation describe-stacks \\",
+            "     --query 'Stacks[?EnableTerminationProtection==`false`].[StackName,StackStatus]' \\",
+            "     --output table",
+            "",
+            "2. Activer termination protection sur stack production:",
+            "   aws cloudformation update-termination-protection \\",
+            "     --stack-name production-stack \\",
+            "     --enable-termination-protection",
+            "",
+            "3. Créer CloudWatch Alarm pour Lambda errors (rollback trigger):",
+            "   aws cloudwatch put-metric-alarm \\",
+            "     --alarm-name lambda-errors-high \\",
+            "     --alarm-description 'Lambda error rate too high' \\",
+            "     --namespace AWS/Lambda \\",
+            "     --metric-name Errors \\",
+            "     --dimensions Name=FunctionName,Value=MyFunction \\",
+            "     --statistic Sum \\",
+            "     --period 60 \\",
+            "     --evaluation-periods 2 \\",
+            "     --threshold 10 \\",
+            "     --comparison-operator GreaterThanThreshold",
+            "",
+            "4. Créer CloudWatch Alarm pour ALB 5xx errors:",
+            "   aws cloudwatch put-metric-alarm \\",
+            "     --alarm-name alb-5xx-errors \\",
+            "     --namespace AWS/ApplicationELB \\",
+            "     --metric-name HTTPCode_Target_5XX_Count \\",
+            "     --dimensions Name=LoadBalancer,Value=app/my-alb/xxxxx \\",
+            "     --statistic Sum \\",
+            "     --period 60 \\",
+            "     --evaluation-periods 3 \\",
+            "     --threshold 50 \\",
+            "     --comparison-operator GreaterThanThreshold",
+            "",
+            "5. Update stack avec Rollback Configuration:",
+            "   aws cloudformation update-stack \\",
+            "     --stack-name production-stack \\",
+            "     --template-body file://template.yaml \\",
+            "     --rollback-configuration \\",
+            "       'RollbackTriggers=[{Arn=arn:aws:cloudwatch:region:account:alarm:lambda-errors-high,Type=AWS::CloudWatch::Alarm},{Arn=arn:aws:cloudwatch:region:account:alarm:alb-5xx-errors,Type=AWS::CloudWatch::Alarm}],MonitoringTimeInMinutes=30'",
+            "",
+            "6. Définir Rollback Config dans template CloudFormation:",
+            "   # Ajouter dans template YAML:",
+            """   RollbackConfiguration:
+     RollbackTriggers:
+       - Arn: !GetAtt LambdaErrorsAlarm.Arn
+         Type: AWS::CloudWatch::Alarm
+       - Arn: !GetAtt ALB5xxErrorsAlarm.Arn
+         Type: AWS::CloudWatch::Alarm
+     MonitoringTimeInMinutes: 30""",
+            "",
+            "7. Créer SNS topic pour stack notifications:",
+            "   aws sns create-topic --name cloudformation-stack-events",
+            "",
+            "8. Souscrire email/Slack au SNS topic:",
+            "   aws sns subscribe \\",
+            "     --topic-arn arn:aws:sns:region:account:cloudformation-stack-events \\",
+            "     --protocol email \\",
+            "     --notification-endpoint devops@example.com",
+            "",
+            "9. Associer SNS topic à stack pour notifications:",
+            "   aws cloudformation update-stack \\",
+            "     --stack-name production-stack \\",
+            "     --notification-arns arn:aws:sns:region:account:cloudformation-stack-events \\",
+            "     --use-previous-template",
+            "",
+            "10. Configurer Rollback dans CI/CD (exemple GitHub Actions):",
+            """    - name: Deploy with Rollback Config
+      run: |
+        aws cloudformation deploy \\
+          --stack-name ${{ env.STACK_NAME }} \\
+          --template-file template.yaml \\
+          --capabilities CAPABILITY_IAM \\
+          --no-fail-on-empty-changeset \\
+          --rollback-configuration file://rollback-config.json
+
+      # rollback-config.json:
+      {
+        \"RollbackTriggers\": [
+          {\"Arn\": \"arn:aws:cloudwatch:...:alarm:errors\", \"Type\": \"AWS::CloudWatch::Alarm\"}
+        ],
+        \"MonitoringTimeInMinutes\": 15
+      }"""
+        ],
+        verification_steps=[
+            "1. Vérifier termination protection sur stacks production:",
+            "   aws cloudformation describe-stacks \\",
+            "     --stack-name production-stack \\",
+            "     --query 'Stacks[0].EnableTerminationProtection'  # Doit être true",
+            "",
+            "2. Tenter supprimer stack avec termination protection (doit échouer):",
+            "   aws cloudformation delete-stack --stack-name production-stack",
+            "   # Expected error: 'Stack [production-stack] cannot be deleted while TerminationProtection is enabled'",
+            "",
+            "3. Lister CloudWatch Alarms configurés comme rollback triggers:",
+            "   aws cloudformation describe-stacks \\",
+            "     --stack-name production-stack \\",
+            "     --query 'Stacks[0].RollbackConfiguration'",
+            "",
+            "4. Vérifier monitoring period configuré:",
+            "   aws cloudformation describe-stacks \\",
+            "     --stack-name production-stack \\",
+            "     --query 'Stacks[0].RollbackConfiguration.MonitoringTimeInMinutes'",
+            "",
+            "5. Tester rollback automatique (simuler alarm):",
+            "   # Déployer changeset qui déclenche alarm (ex: code buggy)",
+            "   # Vérifier stack rollback automatiquement",
+            "   aws cloudformation describe-stack-events \\",
+            "     --stack-name production-stack \\",
+            "     --query 'StackEvents[?ResourceStatus==`ROLLBACK_IN_PROGRESS`]'",
+            "",
+            "6. Vérifier SNS notifications configurées:",
+            "   aws cloudformation describe-stacks \\",
+            "     --stack-name production-stack \\",
+            "     --query 'Stacks[0].NotificationARNs'",
+            "",
+            "7. Tester réception notifications SNS:",
+            "   # Update stack avec changement mineur",
+            "   # Vérifier email/Slack notification reçue",
+            "",
+            "8. Lister stack events pour voir rollback history:",
+            "   aws cloudformation describe-stack-events \\",
+            "     --stack-name production-stack \\",
+            "     --query 'StackEvents[?contains(ResourceStatus, `ROLLBACK`)].[Timestamp,ResourceStatus,ResourceStatusReason]' \\",
+            "     --output table",
+            "",
+            "9. Auditer toutes stacks critiques ont protections:",
+            "   aws cloudformation describe-stacks \\",
+            "     --query 'Stacks[].[StackName,EnableTerminationProtection,RollbackConfiguration.MonitoringTimeInMinutes]' \\",
+            "     --output table",
+            "",
+            "10. Vérifier CloudWatch Alarms sont valides et monitoring actif:",
+            "    aws cloudwatch describe-alarms \\",
+            "      --alarm-names lambda-errors-high alb-5xx-errors \\",
+            "      --query 'MetricAlarms[].[AlarmName,StateValue,ActionsEnabled]'"
+        ],
+        references=[
+            "https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/using-cfn-rollback-triggers.html",
+            "https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/protect-stack-resources.html",
+            "https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/cfn-console-add-tags.html",
+            "https://aws.amazon.com/blogs/devops/announcing-cloudformation-stack-notifications/"
+        ]
+    ),
+
+    Question(
+        id="CFN-006",
+        question="AWS Service Catalog intégré pour templates approuvés, tagging obligatoire, et scanning sécurité pré-déploiement?",
+        description="Vérifier utilisation Service Catalog pour governance templates, enforcement tagging policy, et validation sécurité automatisée",
+        severity="MEDIUM",
+        category="CloudFormation",
+        compliance=["Governance", "Cost Allocation", "Security Compliance"],
+        technical_details="""
+        AWS Service Catalog = catalogue self-service de produits CloudFormation approuvés
+
+        Bénéfices governance:
+        1. Catalogue Templates Approuvés:
+           - Équipes utilisent uniquement templates validés par Security/Ops
+           - Version control: rolling back to previous product versions
+           - Empêche déploiements infrastructure non-standard
+
+        2. Tagging Enforcement:
+           - Tag Options obligatoires: CostCenter, Environment, Owner
+           - Impossible déployer produit sans tags requis
+           - Integration AWS Cost Explorer pour cost allocation
+
+        3. Constraints (Launch Constraints):
+           - Limite régions, instance types, etc.
+           - IAM role pour déploiement (users n'ont pas perms CloudFormation direct)
+           - Template Constraints: validation additionnelle règles business
+
+        4. Portfolio Sharing:
+           - Share portfolios cross-account via AWS Organizations
+           - Central governance dans master account
+           - Propagation automatique nouveau produits approved
+
+        Workflow:
+        1. Security crée CloudFormation templates sécurisés
+        2. Templates ajoutés à Service Catalog comme Products
+        3. Developers deployent via Service Catalog (pas CFN direct)
+        4. Tags + constraints enforcement automatique
+        5. Audit trail complet (qui a déployé quoi)
+
+        Compliance:
+        - FinOps: Cost allocation tags obligatoires
+        - Security: Uniquement infrastructure pré-approuvée
+        - Audit: CloudTrail logging all Service Catalog operations
+        """,
+        remediation=[
+            "1. Créer Portfolio Service Catalog pour infrastructure approuvée:",
+            "   aws servicecatalog create-portfolio \\",
+            "     --display-name 'Approved Infrastructure' \\",
+            "     --description 'Security-approved CloudFormation templates' \\",
+            "     --provider-name 'Security Team'",
+            "",
+            "2. Créer Product depuis template CloudFormation (exemple: VPC sécurisé):",
+            "   aws servicecatalog create-product \\",
+            "     --name 'Secure VPC' \\",
+            "     --owner 'Security Team' \\",
+            "     --product-type CLOUD_FORMATION_TEMPLATE \\",
+            "     --provisioning-artifact-parameters '{",
+            '       "Name": "v1.0",',
+            '       "Type": "CLOUD_FORMATION_TEMPLATE",',
+            '       "Info": {"LoadTemplateFromURL": "https://s3.../secure-vpc.yaml"}',
+            "     }'",
+            "",
+            "3. Associer Product au Portfolio:",
+            "   aws servicecatalog associate-product-with-portfolio \\",
+            "     --product-id prod-xxxxx \\",
+            "     --portfolio-id port-xxxxx",
+            "",
+            "4. Créer Tag Options obligatoires (enforcement):",
+            "   aws servicecatalog create-tag-option \\",
+            "     --key Environment \\",
+            "     --value Production",
+            "",
+            "   aws servicecatalog create-tag-option \\",
+            "     --key CostCenter \\",
+            "     --value Engineering",
+            "",
+            "   aws servicecatalog create-tag-option \\",
+            "     --key Owner \\",
+            "     --value team@example.com",
+            "",
+            "5. Associer Tag Options au Portfolio (obligatoire pour tous produits):",
+            "   aws servicecatalog associate-tag-option-with-resource \\",
+            "     --resource-id port-xxxxx \\",
+            "     --tag-option-id tag-xxxxx",
+            "",
+            "6. Créer Launch Constraint (IAM role pour provisioning):",
+            "   aws servicecatalog create-constraint \\",
+            "     --portfolio-id port-xxxxx \\",
+            "     --product-id prod-xxxxx \\",
+            "     --type LAUNCH \\",
+            "     --parameters '{\"RoleArn\": \"arn:aws:iam::account:role/ServiceCatalogLaunchRole\"}'",
+            "",
+            "7. Créer Template Constraint (validation business rules):",
+            "   Créer fichier template-constraint.json:",
+            """   {
+     \"Rules\": {
+       \"InstanceTypeRule\": {
+         \"Assertions\": [{
+           \"Assert\": {\"Fn::Contains\": [[\"t3.micro\", \"t3.small\", \"t3.medium\"], {\"Ref\": \"InstanceType\"}]},
+           \"AssertDescription\": \"Instance type must be t3.micro, t3.small, or t3.medium\"
+         }]
+       }
+     }
+   }""",
+            "",
+            "   aws servicecatalog create-constraint \\",
+            "     --portfolio-id port-xxxxx \\",
+            "     --product-id prod-xxxxx \\",
+            "     --type TEMPLATE \\",
+            "     --parameters file://template-constraint.json",
+            "",
+            "8. Donner accès Portfolio à IAM principals (users/groups/roles):",
+            "   aws servicecatalog associate-principal-with-portfolio \\",
+            "     --portfolio-id port-xxxxx \\",
+            "     --principal-arn arn:aws:iam::account:role/Developers \\",
+            "     --principal-type IAM",
+            "",
+            "9. Partager Portfolio cross-account via Organizations:",
+            "   aws servicecatalog create-portfolio-share \\",
+            "     --portfolio-id port-xxxxx \\",
+            "     --organization-node '{\"Type\": \"ORGANIZATION\", \"Value\": \"ou-xxxxx\"}'",
+            "",
+            "10. Provisioner produit via Service Catalog (en tant que developer):",
+            "    aws servicecatalog provision-product \\",
+            "      --product-id prod-xxxxx \\",
+            "      --provisioning-artifact-id pa-xxxxx \\",
+            "      --provisioned-product-name my-secure-vpc \\",
+            "      --tags Key=Environment,Value=Production Key=CostCenter,Value=Engineering",
+            "",
+            "11. Créer automation scanning templates avant ajout à Catalog:",
+            "    # Dans CI/CD, avant create-product:",
+            "    cfn-guard validate --data template.yaml --rules security-rules/",
+            "    cfn_nag_scan --input-path template.yaml",
+            "    # Si validation OK → create-product"
+        ],
+        verification_steps=[
+            "1. Lister Portfolios Service Catalog:",
+            "   aws servicecatalog list-portfolios",
+            "",
+            "2. Lister Products dans Portfolio:",
+            "   aws servicecatalog search-products-as-admin \\",
+            "     --portfolio-id port-xxxxx",
+            "",
+            "3. Vérifier Tag Options configurés:",
+            "   aws servicecatalog list-tag-options",
+            "",
+            "4. Vérifier Tag Options associés au Portfolio:",
+            "   aws servicecatalog list-resources-for-tag-option \\",
+            "     --tag-option-id tag-xxxxx",
+            "",
+            "5. Lister Constraints appliqués au Product:",
+            "   aws servicecatalog list-constraints-for-portfolio \\",
+            "     --portfolio-id port-xxxxx \\",
+            "     --product-id prod-xxxxx",
+            "",
+            "6. Vérifier Launch Constraint IAM role existe et a bonnes permissions:",
+            "   aws iam get-role --role-name ServiceCatalogLaunchRole",
+            "",
+            "7. Lister principals ayant accès au Portfolio:",
+            "   aws servicecatalog list-principals-for-portfolio \\",
+            "     --portfolio-id port-xxxxx",
+            "",
+            "8. Vérifier Portfolio sharing cross-account:",
+            "   aws servicecatalog describe-portfolio-shares \\",
+            "     --portfolio-id port-xxxxx \\",
+            "     --type IMPORTED",
+            "",
+            "9. Auditer produits provisionnés (en tant qu'admin):",
+            "   aws servicecatalog scan-provisioned-products",
+            "",
+            "10. Tester provisioning sans tags requis (doit échouer):",
+            "    aws servicecatalog provision-product \\",
+            "      --product-id prod-xxxxx \\",
+            "      --provisioned-product-name test",
+            "    # Devrait échouer si Tag Options obligatoires non fournis",
+            "",
+            "11. Vérifier CloudTrail logs pour Service Catalog operations:",
+            "    aws cloudtrail lookup-events \\",
+            "      --lookup-attributes AttributeKey=ResourceType,AttributeValue=AWS::ServiceCatalog::CloudFormationProduct \\",
+            "      --max-results 10",
+            "",
+            "12. Vérifier Cost Allocation Tags activés:",
+            "    aws ce list-cost-allocation-tags \\",
+            "      --status Active",
+            "    # Tags CostCenter, Environment doivent être activés"
+        ],
+        references=[
+            "https://docs.aws.amazon.com/servicecatalog/latest/adminguide/introduction.html",
+            "https://docs.aws.amazon.com/servicecatalog/latest/adminguide/constraints.html",
+            "https://docs.aws.amazon.com/servicecatalog/latest/adminguide/tagoptions.html",
+            "https://docs.aws.amazon.com/servicecatalog/latest/adminguide/catalogs_portfolios_sharing.html",
+            "https://aws.amazon.com/blogs/mt/tag-governance-in-multi-account-environments-using-aws-service-catalog/"
+        ]
     )
 ]
 
@@ -7953,6 +8500,462 @@ ROUTE53_QUESTIONS = [
         remediation=["create-query-logging-config", "create-health-check avec AlarmConfiguration", "SNS topic pour notifications"],
         verification_steps=["list-query-logging-configs", "list-health-checks", "CloudWatch Logs groupe /aws/route53/"],
         references=["https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/query-logs.html"]
+    ),
+
+    Question(
+        id="R53-003",
+        question="Route53 Resolver Endpoints (inbound/outbound) sécurisés avec security groups restrictifs et logs activés?",
+        description="Vérifier configuration sécurisée Resolver Endpoints pour hybrid DNS entre AWS et on-premises avec monitoring",
+        severity="HIGH",
+        category="Route53",
+        compliance=["Hybrid Cloud Security", "Network Segmentation", "CIS Benchmark"],
+        technical_details="""
+        Route53 Resolver Endpoints = DNS forwarding AWS ↔ on-premises
+
+        Types d'endpoints:
+        1. Inbound Endpoint:
+           - On-premises → AWS DNS queries
+           - ENI dans VPC avec IP privées
+           - Permet résoudre domaines privés AWS depuis datacenter
+
+        2. Outbound Endpoint:
+           - AWS → on-premises DNS queries
+           - Forwarding rules conditionnelles (example.corp → on-prem DNS)
+           - Permet résoudre domaines corporate depuis AWS
+
+        Sécurité requise:
+        - Security Groups: port 53 TCP/UDP uniquement depuis IPs approuvées
+        - Query Logs: audit toutes DNS queries forwarded
+        - Resolver Rules: limited forwarding domains (pas *.*)
+        - Placement: private subnets uniquement
+
+        Compliance:
+        - CIS: Network segmentation et least privilege access
+        - Hybrid Cloud: Secure DNS resolution entre cloud et on-prem
+        """,
+        remediation=[
+            "1. Vérifier endpoints existants et leur configuration:",
+            "   aws route53resolver list-resolver-endpoints",
+            "",
+            "2. Créer Inbound Endpoint avec security groups restrictifs:",
+            "   aws route53resolver create-resolver-endpoint \\",
+            "     --name my-inbound-endpoint \\",
+            "     --direction INBOUND \\",
+            "     --ip-addresses 'SubnetId=subnet-xxx,Ip=10.0.1.10' 'SubnetId=subnet-yyy,Ip=10.0.2.10' \\",
+            "     --security-group-ids sg-xxxxxxxxx",
+            "",
+            "3. Security Group pour Inbound (autoriser DNS depuis on-premises uniquement):",
+            "   aws ec2 authorize-security-group-ingress \\",
+            "     --group-id sg-xxxxxxxxx \\",
+            "     --protocol tcp \\",
+            "     --port 53 \\",
+            "     --cidr 192.168.0.0/16  # On-premises CIDR",
+            "",
+            "   aws ec2 authorize-security-group-ingress \\",
+            "     --group-id sg-xxxxxxxxx \\",
+            "     --protocol udp \\",
+            "     --port 53 \\",
+            "     --cidr 192.168.0.0/16",
+            "",
+            "4. Créer Outbound Endpoint:",
+            "   aws route53resolver create-resolver-endpoint \\",
+            "     --name my-outbound-endpoint \\",
+            "     --direction OUTBOUND \\",
+            "     --ip-addresses 'SubnetId=subnet-aaa,Ip=10.0.3.10' 'SubnetId=subnet-bbb,Ip=10.0.4.10' \\",
+            "     --security-group-ids sg-yyyyyyyyy",
+            "",
+            "5. Security Group pour Outbound (autoriser vers on-prem DNS servers):",
+            "   aws ec2 authorize-security-group-egress \\",
+            "     --group-id sg-yyyyyyyyy \\",
+            "     --protocol tcp \\",
+            "     --port 53 \\",
+            "     --cidr 192.168.1.10/32  # On-prem DNS server",
+            "",
+            "6. Créer Forwarding Rule pour domaines corporate:",
+            "   aws route53resolver create-resolver-rule \\",
+            "     --name forward-corp-domain \\",
+            "     --rule-type FORWARD \\",
+            "     --domain-name example.corp \\",
+            "     --resolver-endpoint-id rslvr-out-xxxxx \\",
+            "     --target-ips 'Ip=192.168.1.10,Port=53' 'Ip=192.168.1.11,Port=53'",
+            "",
+            "7. Associer rule au VPC:",
+            "   aws route53resolver associate-resolver-rule \\",
+            "     --resolver-rule-id rslvr-rr-xxxxx \\",
+            "     --vpc-id vpc-xxxxxxxx",
+            "",
+            "8. Activer Query Logging pour audit:",
+            "   aws route53resolver create-resolver-query-log-config \\",
+            "     --name resolver-query-logs \\",
+            "     --destination-arn arn:aws:logs:region:account:log-group:/aws/route53/resolver/queries",
+            "",
+            "9. Associer logging config au VPC:",
+            "   aws route53resolver associate-resolver-query-log-config \\",
+            "     --resolver-query-log-config-id rqlc-xxxxx \\",
+            "     --vpc-id vpc-xxxxxxxx"
+        ],
+        verification_steps=[
+            "1. Lister Resolver Endpoints et vérifier configuration:",
+            "   aws route53resolver list-resolver-endpoints",
+            "",
+            "2. Vérifier Security Groups associés aux endpoints:",
+            "   aws route53resolver get-resolver-endpoint \\",
+            "     --resolver-endpoint-id rslvr-in-xxxxx \\",
+            "     --query 'ResolverEndpoint.SecurityGroupIds'",
+            "",
+            "3. Auditer règles Security Groups (ne doivent pas être 0.0.0.0/0):",
+            "   aws ec2 describe-security-groups \\",
+            "     --group-ids sg-xxxxxxxxx \\",
+            "     --query 'SecurityGroups[].IpPermissions'",
+            "",
+            "4. Lister Resolver Rules et vérifier domaines forwardés:",
+            "   aws route53resolver list-resolver-rules",
+            "",
+            "5. Vérifier Query Logging est activé:",
+            "   aws route53resolver list-resolver-query-log-configs",
+            "",
+            "6. Tester résolution DNS depuis EC2 instance:",
+            "   dig @10.0.1.10 internal.example.com  # Via inbound endpoint",
+            "   dig example.corp  # Via outbound forwarding",
+            "",
+            "7. Vérifier logs dans CloudWatch:",
+            "   aws logs filter-log-events \\",
+            "     --log-group-name /aws/route53/resolver/queries \\",
+            "     --start-time $(date -d '1 hour ago' +%s)000 \\",
+            "     --limit 10"
+        ],
+        references=[
+            "https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/resolver.html",
+            "https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/resolver-forwarding-inbound-queries.html",
+            "https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/resolver-forwarding-outbound-queries.html",
+            "https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/resolver-query-logs.html"
+        ]
+    ),
+
+    Question(
+        id="R53-004",
+        question="Traffic Flow policies configurées pour géolocalisation, failover, et protection DDoS avec AWS Shield?",
+        description="Vérifier utilisation Traffic Policies pour routing intelligent, compliance géographique (GDPR), et protection DDoS",
+        severity="MEDIUM",
+        category="Route53",
+        compliance=["GDPR Data Residency", "High Availability", "DDoS Protection"],
+        technical_details="""
+        Route53 Traffic Flow = visual policy editor pour routing complexe
+
+        Types de routing policies:
+        1. Geolocation:
+           - Route selon pays/continent d'origine
+           - GDPR: données EU restent dans région EU
+           - Compliance locale (data sovereignty)
+
+        2. Geoproximity:
+           - Route selon distance géographique
+           - Bias adjustment pour préférer certaines régions
+
+        3. Failover:
+           - Primary/Secondary avec health checks
+           - Automatic failover si primary unhealthy
+
+        4. Weighted:
+           - A/B testing, blue-green deployments
+           - Distribution % traffic entre endpoints
+
+        5. Latency-based:
+           - Route vers région avec plus faible latence
+
+        AWS Shield Standard/Advanced:
+        - Standard: inclus gratuit avec Route53
+        - Advanced: $3000/mois, DDoS protection 24/7, cost protection
+        - Shield + Route53: health-based traffic shifting pendant attaque
+
+        Cas d'usage:
+        - Multi-region avec failover automatique
+        - Compliance GDPR (users EU → infrastructure EU uniquement)
+        - DDoS mitigation avec traffic shifting
+        """,
+        remediation=[
+            "1. Lister hosted zones et leurs policies actuelles:",
+            "   aws route53 list-hosted-zones",
+            "   aws route53 list-traffic-policies",
+            "",
+            "2. Créer Traffic Policy avec geolocation et failover:",
+            "   Créer fichier traffic-policy.json:",
+            """   {
+      "AWSPolicyFormatVersion": "2015-10-01",
+      "RecordType": "A",
+      "StartRule": "geolocation_rule",
+      "Endpoints": {
+        "eu_endpoint": {
+          "Type": "elastic-load-balancer",
+          "Region": "eu-west-1",
+          "Value": "eu-alb.example.com"
+        },
+        "us_endpoint": {
+          "Type": "elastic-load-balancer",
+          "Region": "us-east-1",
+          "Value": "us-alb.example.com"
+        },
+        "global_endpoint": {
+          "Type": "elastic-load-balancer",
+          "Region": "us-east-1",
+          "Value": "global-alb.example.com"
+        }
+      },
+      "Rules": {
+        "geolocation_rule": {
+          "RuleType": "geolocation",
+          "GeolocationCountry": [
+            { "Value": "eu_endpoint", "IsDefault": false, "Evaluate": ["FR", "DE", "IT"] },
+            { "Value": "us_endpoint", "IsDefault": false, "Evaluate": ["US", "CA"] }
+          ],
+          "Primary": { "EndpointReference": "global_endpoint" }
+        }
+      }
+    }""",
+            "",
+            "3. Créer la Traffic Policy:",
+            "   aws route53 create-traffic-policy \\",
+            "     --name geo-failover-policy \\",
+            "     --document file://traffic-policy.json",
+            "",
+            "4. Créer health checks pour endpoints:",
+            "   aws route53 create-health-check \\",
+            "     --health-check-config \\",
+            "       Protocol=HTTPS,ResourcePath=/health,FullyQualifiedDomainName=eu-alb.example.com,Port=443,Type=HTTPS",
+            "",
+            "5. Appliquer Traffic Policy à un record:",
+            "   aws route53 create-traffic-policy-instance \\",
+            "     --hosted-zone-id Z1234567890ABC \\",
+            "     --name www.example.com \\",
+            "     --ttl 60 \\",
+            "     --traffic-policy-id 1a2b3c4d \\",
+            "     --traffic-policy-version 1",
+            "",
+            "6. Activer AWS Shield Advanced (pour DDoS protection renforcée):",
+            "   aws shield subscribe \\",
+            "     --subscription",
+            "",
+            "7. Associer Route53 hosted zone à Shield Advanced:",
+            "   aws shield create-protection \\",
+            "     --name route53-protection \\",
+            "     --resource-arn arn:aws:route53:::hostedzone/Z1234567890ABC",
+            "",
+            "8. Configurer alarmes CloudWatch pour health checks:",
+            "   aws cloudwatch put-metric-alarm \\",
+            "     --alarm-name route53-health-check-failed \\",
+            "     --alarm-description 'Route53 health check failing' \\",
+            "     --namespace AWS/Route53 \\",
+            "     --metric-name HealthCheckStatus \\",
+            "     --dimensions Name=HealthCheckId,Value=xxxxx \\",
+            "     --statistic Minimum \\",
+            "     --period 60 \\",
+            "     --evaluation-periods 2 \\",
+            "     --threshold 1 \\",
+            "     --comparison-operator LessThanThreshold \\",
+            "     --alarm-actions arn:aws:sns:region:account:route53-alerts"
+        ],
+        verification_steps=[
+            "1. Lister Traffic Policies actives:",
+            "   aws route53 list-traffic-policies",
+            "",
+            "2. Vérifier Traffic Policy instances appliquées:",
+            "   aws route53 list-traffic-policy-instances",
+            "",
+            "3. Tester geolocation routing avec VPN de différents pays:",
+            "   # Depuis France:",
+            "   dig www.example.com  # Devrait retourner EU endpoint",
+            "   # Depuis USA:",
+            "   dig www.example.com  # Devrait retourner US endpoint",
+            "",
+            "4. Vérifier health checks status:",
+            "   aws route53 get-health-check-status \\",
+            "     --health-check-id xxxxx",
+            "",
+            "5. Tester failover en désactivant primary endpoint:",
+            "   # Simuler failure primary",
+            "   # Vérifier que traffic bascule vers secondary",
+            "",
+            "6. Vérifier AWS Shield subscription:",
+            "   aws shield describe-subscription",
+            "",
+            "7. Monitorer métriques Route53 dans CloudWatch:",
+            "   aws cloudwatch get-metric-statistics \\",
+            "     --namespace AWS/Route53 \\",
+            "     --metric-name HealthCheckStatus \\",
+            "     --dimensions Name=HealthCheckId,Value=xxxxx \\",
+            "     --start-time $(date -u -d '1 hour ago' +%Y-%m-%dT%H:%M:%S) \\",
+            "     --end-time $(date -u +%Y-%m-%dT%H:%M:%S) \\",
+            "     --period 300 \\",
+            "     --statistics Average",
+            "",
+            "8. Vérifier logs Shield (si Advanced activé):",
+            "   aws shield describe-attack \\",
+            "     --resource-arn arn:aws:route53:::hostedzone/Z1234567890ABC"
+        ],
+        references=[
+            "https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/traffic-flow.html",
+            "https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/routing-policy.html",
+            "https://docs.aws.amazon.com/waf/latest/developerguide/ddos-overview.html",
+            "https://aws.amazon.com/shield/"
+        ]
+    ),
+
+    Question(
+        id="R53-005",
+        question="Domain registration avec Transfer Lock et Auto-Renew activés, WHOIS privacy enabled, contacts alertes configurés?",
+        description="Vérifier protection domaines contre transferts non-autorisés, expiration accidentelle, et exposition données WHOIS",
+        severity="HIGH",
+        category="Route53",
+        compliance=["Domain Security", "GDPR Privacy", "Business Continuity"],
+        technical_details="""
+        Route53 Domain Registration Security = protection domaines critiques
+
+        Protections essentielles:
+        1. Transfer Lock:
+           - Empêche transfert non-autorisé vers autre registrar
+           - Protection contre domain hijacking
+           - Requis pour domaines production critiques
+
+        2. Auto-Renew:
+           - Renouvellement automatique avant expiration
+           - Évite perte domaine par oubli
+           - Payment method backup configuré
+
+        3. WHOIS Privacy Protection:
+           - Masque informations contact propriétaire
+           - Requis GDPR pour données personnelles
+           - Réduit spam et social engineering
+
+        4. Domain Contacts Alertes:
+           - Email alertes 45/30/7 jours avant expiration
+           - Notification changements domain (transfer, DNS, etc.)
+           - SNS integration pour alertes automatisées
+
+        Risques sans protection:
+        - Domain hijacking (social engineering registrar)
+        - Expiration accidentelle → site down
+        - Exposition données personnelles (WHOIS)
+        - Phishing via informations contact exposées
+
+        Compliance:
+        - GDPR: Privacy protection obligatoire pour domaines EU
+        - Business Continuity: Auto-renew + alertes
+        """,
+        remediation=[
+            "1. Lister domaines enregistrés Route53:",
+            "   aws route53domains list-domains",
+            "",
+            "2. Vérifier configuration d'un domaine spécifique:",
+            "   aws route53domains get-domain-detail \\",
+            "     --domain-name example.com",
+            "",
+            "3. Activer Transfer Lock:",
+            "   aws route53domains enable-domain-transfer-lock \\",
+            "     --domain-name example.com",
+            "",
+            "4. Activer Auto-Renew:",
+            "   aws route53domains enable-domain-auto-renew \\",
+            "     --domain-name example.com",
+            "",
+            "5. Vérifier Auto-Renew est activé:",
+            "   aws route53domains get-domain-detail \\",
+            "     --domain-name example.com \\",
+            "     --query 'AutoRenew'",
+            "",
+            "6. Activer WHOIS Privacy Protection:",
+            "   aws route53domains update-domain-contact-privacy \\",
+            "     --domain-name example.com \\",
+            "     --admin-privacy true \\",
+            "     --registrant-privacy true \\",
+            "     --tech-privacy true",
+            "",
+            "7. Configurer contacts alertes valides:",
+            "   aws route53domains update-domain-contact \\",
+            "     --domain-name example.com \\",
+            "     --admin-contact FirstName=Admin,LastName=Team,Email=admin@example.com \\",
+            "     --registrant-contact FirstName=Registrant,LastName=Team,Email=registrant@example.com \\",
+            "     --tech-contact FirstName=Tech,LastName=Team,Email=tech@example.com",
+            "",
+            "8. Vérifier payment method pour auto-renew:",
+            "   # Via AWS Console > Route53 > Registered domains > Payment methods",
+            "   # S'assurer qu'une carte valide est configurée",
+            "",
+            "9. Créer CloudWatch Event Rule pour alertes expiration:",
+            "   aws events put-rule \\",
+            "     --name route53-domain-expiration-alert \\",
+            "     --event-pattern '{",
+            '       "source": ["aws.route53domains"],',
+            '       "detail-type": ["AWS API Call via CloudTrail"],',
+            '       "detail": {',
+            '         "eventName": ["DomainExpirationNotification"]',
+            "       }",
+            "     }'",
+            "",
+            "10. Associer SNS topic pour notifications:",
+            "    aws events put-targets \\",
+            "      --rule route53-domain-expiration-alert \\",
+            "      --targets 'Id=1,Arn=arn:aws:sns:us-east-1:123456789012:domain-alerts'",
+            "",
+            "11. Pour domaines critiques, configurer MFA delete protection:",
+            "    # Activer MFA sur compte AWS root",
+            "    # Route53 domain operations nécessiteront MFA"
+        ],
+        verification_steps=[
+            "1. Auditer tous domaines et leur statut protection:",
+            "   aws route53domains list-domains \\",
+            "     --query 'Domains[].[DomainName,AutoRenew,TransferLock,Expiry]' \\",
+            "     --output table",
+            "",
+            "2. Vérifier Transfer Lock est activé:",
+            "   aws route53domains get-domain-detail \\",
+            "     --domain-name example.com \\",
+            "     --query 'StatusList' | grep TRANSFER_LOCK",
+            "",
+            "3. Vérifier Auto-Renew activé:",
+            "   aws route53domains get-domain-detail \\",
+            "     --domain-name example.com \\",
+            "     --query 'AutoRenew'  # Doit être true",
+            "",
+            "4. Vérifier WHOIS privacy protection:",
+            "   whois example.com | grep -i privacy  # Doit montrer privacy protection active",
+            "   # Ou:",
+            "   aws route53domains get-domain-detail \\",
+            "     --domain-name example.com \\",
+            "     --query '[AdminPrivacy,RegistrantPrivacy,TechPrivacy]'",
+            "",
+            "5. Vérifier date expiration et temps restant:",
+            "   aws route53domains get-domain-detail \\",
+            "     --domain-name example.com \\",
+            "     --query 'ExpirationDate'",
+            "",
+            "6. Tester réception alertes email:",
+            "   # Vérifier inbox des contacts admin/tech/registrant",
+            "   # Chercher emails AWS Route53 Domains",
+            "",
+            "7. Vérifier contacts sont valides et monitored:",
+            "   aws route53domains get-domain-detail \\",
+            "     --domain-name example.com \\",
+            "     --query '[AdminContact.Email,RegistrantContact.Email,TechContact.Email]'",
+            "",
+            "8. Lister domaines expirant dans 90 jours:",
+            "   aws route53domains list-domains \\",
+            "     --query 'Domains[?Expiry<=`$(date -d '+90 days' -u +%Y-%m-%dT%H:%M:%SZ)`].[DomainName,Expiry]'",
+            "",
+            "9. Vérifier CloudWatch Events pour alertes expiration:",
+            "   aws events list-rules \\",
+            "     --name-prefix route53-domain",
+            "",
+            "10. Test unlock domain (pour vérifier lock fonctionne):",
+            "    aws route53domains disable-domain-transfer-lock \\",
+            "      --domain-name example.com",
+            "    # Devrait échouer ou requérir confirmation additionnelle"
+        ],
+        references=[
+            "https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/domain-transfer-to-route-53.html",
+            "https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/domain-privacy-protection.html",
+            "https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/domain-enable-disable-auto-renewal.html",
+            "https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/domain-lock.html"
+        ]
     )
 ]
 
