@@ -8345,6 +8345,758 @@ CLOUDWATCH_QUESTIONS = [
         remediation=["Créer filters: UnauthorizedAPICalls, RootAccountUsage, IAMPolicyChanges", "aws logs put-metric-filter", "Alarmes sur metrics"],
         verification_steps=["aws logs describe-metric-filters", "CIS Benchmark section 3 (Monitoring)", "Test avec unauthorized API call"],
         references=["https://docs.aws.amazon.com/securityhub/latest/userguide/securityhub-cis-controls.html"]
+    ),
+
+    Question(
+        id="CW-004",
+        question="CloudWatch Logs Insights utilisé pour querying SQL-like, dashboards interactifs, et automated analysis?",
+        description="Vérifier utilisation Logs Insights pour investigation rapide logs, trend analysis, et troubleshooting performance",
+        severity="MEDIUM",
+        category="CloudWatch",
+        compliance=["Operational Excellence", "Incident Response", "Performance Monitoring"],
+        technical_details="""
+        CloudWatch Logs Insights = moteur query interactif pour logs
+
+        Capacités:
+        1. Query Language:
+           - SQL-like syntax (fields, filter, stats, sort, limit)
+           - Regex pattern matching
+           - Parsing JSON/structured logs automatiquement
+           - Aggregations: count(), avg(), sum(), min(), max()
+
+        2. Use Cases:
+           - Find errors: `filter @message like /ERROR/`
+           - Top 10 errors: `stats count() by @message | sort count desc | limit 10`
+           - P95 latency: `stats percentile(@duration, 95) by bin(5m)`
+           - Failed Lambda invocations: `filter @type = "REPORT" | filter @message like /Task timed out/`
+
+        3. Saved Queries:
+           - Bibliothèque queries réutilisables
+           - Partage queries entre équipes
+           - Scheduled queries pour alerting
+
+        4. Visualization:
+           - Graphs: line, bar, stacked area
+           - Export vers CloudWatch Dashboards
+           - Time series analysis
+
+        Avantages vs grep/awk:
+        - Query distribuée (billions logs en secondes)
+        - Pas besoin télécharger logs localement
+        - Auto-discovery champs JSON
+        - Real-time querying
+
+        Compliance:
+        - Incident Response: rapid log investigation
+        - Forensics: post-mortem analysis
+        - Performance: latency trends identification
+        """,
+        remediation=[
+            "1. Accéder CloudWatch Logs Insights:",
+            "   # Via Console: CloudWatch > Logs > Insights",
+            "   # Ou CLI:",
+            "   aws logs start-query \\",
+            "     --log-group-name /aws/lambda/my-function \\",
+            "     --start-time $(date -d '1 hour ago' +%s) \\",
+            "     --end-time $(date +%s) \\",
+            "     --query-string 'fields @timestamp, @message | filter @message like /ERROR/ | sort @timestamp desc | limit 20'",
+            "",
+            "2. Query exemple: Top 10 errors par type:",
+            "   fields @timestamp, @message",
+            "   | parse @message /(?<error_type>\\w+Error)/",
+            "   | stats count() as error_count by error_type",
+            "   | sort error_count desc",
+            "   | limit 10",
+            "",
+            "3. Query exemple: P50/P95/P99 latency Lambda:",
+            "   filter @type = \"REPORT\"",
+            "   | fields @duration",
+            "   | stats avg(@duration) as avg_duration,",
+            "           percentile(@duration, 50) as p50,",
+            "           percentile(@duration, 95) as p95,",
+            "           percentile(@duration, 99) as p99",
+            "           by bin(5m)",
+            "",
+            "4. Query exemple: Failed API Gateway requests:",
+            "   fields @timestamp, status, httpMethod, path, ip",
+            "   | filter status >= 500",
+            "   | stats count() as error_count by status, path",
+            "   | sort error_count desc",
+            "",
+            "5. Créer Saved Query pour réutilisation:",
+            "   # Via Console: Run query > Save",
+            "   # Donner nom: 'Lambda Errors Last Hour'",
+            "   # Partager avec équipe",
+            "",
+            "6. Query exemple: Security - Unauthorized API calls:",
+            "   fields @timestamp, userIdentity.principalId, eventName, errorCode",
+            "   | filter errorCode like /Unauthorized|Denied|Forbidden/",
+            "   | stats count() as attempts by userIdentity.principalId, eventName",
+            "   | sort attempts desc",
+            "",
+            "7. Exporter résultats vers S3 pour long-term analysis:",
+            "   aws logs create-export-task \\",
+            "     --log-group-name /aws/lambda/my-function \\",
+            "     --from $(date -d '7 days ago' +%s)000 \\",
+            "     --to $(date +%s)000 \\",
+            "     --destination s3-bucket-name \\",
+            "     --destination-prefix logs-export/",
+            "",
+            "8. Créer Dashboard avec query results:",
+            "   # Via Console: Logs Insights > Run query > Add to dashboard",
+            "   # Ou programmatiquement:",
+            "   aws cloudwatch put-dashboard \\",
+            "     --dashboard-name operations-dashboard \\",
+            "     --dashboard-body file://dashboard-config.json",
+            "",
+            "9. Query exemple: Top IP addresses par requests:",
+            "   fields @timestamp, ip",
+            "   | stats count() as request_count by ip",
+            "   | sort request_count desc",
+            "   | limit 20",
+            "",
+            "10. Automated querying avec Lambda (scheduled):",
+            "    # Lambda function qui run query chaque hour",
+            "    import boto3",
+            "    import time",
+            "",
+            "    logs = boto3.client('logs')",
+            "    ",
+            "    query_id = logs.start_query(",
+            "        logGroupName='/aws/lambda/my-function',",
+            "        startTime=int(time.time()) - 3600,",
+            "        endTime=int(time.time()),",
+            "        queryString='fields @message | filter @message like /ERROR/ | stats count()'",
+            "    )['queryId']",
+            "",
+            "    # Wait for results",
+            "    results = logs.get_query_results(queryId=query_id)"
+        ],
+        verification_steps=[
+            "1. Vérifier accès Logs Insights:",
+            "   # Via Console: CloudWatch > Logs > Insights",
+            "   # Doit lister log groups disponibles",
+            "",
+            "2. Tester query simple sur log group:",
+            "   fields @timestamp, @message",
+            "   | sort @timestamp desc",
+            "   | limit 20",
+            "",
+            "3. Vérifier parsing automatique JSON logs:",
+            "   # Si logs sont JSON, champs doivent être auto-découverts",
+            "   # Test: cliquer 'Fields' dans sidebar",
+            "",
+            "4. Lister saved queries existantes:",
+            "   # Via Console: Logs Insights > Queries tab",
+            "   # Vérifier queries critiques sont sauvées",
+            "",
+            "5. Tester query performance (billions logs):",
+            "   # Run query sur large time range (7 days)",
+            "   # Vérifier query complete en < 30 secondes",
+            "",
+            "6. Créer query complexe avec aggregations:",
+            "   stats count() as total,",
+            "         avg(@duration) as avg_duration",
+            "         by bin(1h)",
+            "",
+            "7. Exporter résultats query vers CSV:",
+            "   # Via Console: Run query > Export results",
+            "   # Vérifier CSV contient toutes colonnes",
+            "",
+            "8. Vérifier integration avec CloudWatch Dashboards:",
+            "   # Ajouter query result à dashboard",
+            "   # Vérifier auto-refresh fonctionne",
+            "",
+            "9. Test query pour security monitoring:",
+            "   filter @message like /AccessDenied|UnauthorizedOperation/",
+            "   | stats count() by bin(1h)",
+            "   # Doit retourner timeline unauthorized attempts",
+            "",
+            "10. Benchmark query cost:",
+            "    # CloudWatch Logs Insights pricing: $0.005 per GB scanned",
+            "    # Check 'Data scanned' après query",
+            "    # Optimize avec time range filters"
+        ],
+        references=[
+            "https://docs.aws.amazon.com/AmazonCloudWatch/latest/logs/AnalyzingLogData.html",
+            "https://docs.aws.amazon.com/AmazonCloudWatch/latest/logs/CWL_QuerySyntax.html",
+            "https://docs.aws.amazon.com/AmazonCloudWatch/latest/logs/CWL_QuerySyntax-examples.html",
+            "https://aws.amazon.com/blogs/aws/new-amazon-cloudwatch-logs-insights-fast-interactive-log-analytics/"
+        ]
+    ),
+
+    Question(
+        id="CW-005",
+        question="CloudWatch Contributor Insights activé pour identifier top contributors (IPs, users, errors) automatiquement?",
+        description="Vérifier Contributor Insights rules pour analysis automatisé top-N contributors impactant métriques/logs",
+        severity="MEDIUM",
+        category="CloudWatch",
+        compliance=["Performance Analysis", "Troubleshooting", "Capacity Planning"],
+        technical_details="""
+        CloudWatch Contributor Insights = automatic identification top contributors
+
+        Fonctionnement:
+        1. Rules-based analysis:
+           - Définir rule avec pattern matching
+           - Identifier contributors (IP, user, error type, etc.)
+           - Ranking automatique par impact
+
+        2. Use Cases:
+           - Top talkers: IPs générant le plus requests
+           - Top errors: error messages les plus fréquents
+           - Heavy hitters: users consommant le plus resources
+           - DDoS detection: spike anomalous IPs
+
+        3. Data Sources:
+           - CloudWatch Logs
+           - VPC Flow Logs
+           - CloudTrail Logs
+           - Application logs
+
+        4. Visualizations:
+           - Time series top-N contributors
+           - Contribution percentage
+           - Trend analysis
+           - Automatic ranking updates
+
+        Exemple rules:
+        - Top 10 IPs par HTTP requests
+        - Top 10 Lambda functions par errors
+        - Top 10 DynamoDB tables par throttled requests
+        - Top users par API calls
+
+        Avantages:
+        - Automated analysis (pas besoin query manually)
+        - Real-time insights
+        - Integration CloudWatch Dashboards
+        - Anomaly detection
+
+        Compliance:
+        - Performance troubleshooting
+        - Capacity planning (identify hotspots)
+        - Security (detect anomalous behavior)
+        """,
+        remediation=[
+            "1. Créer Contributor Insights rule pour top IPs (ALB logs):",
+            "   aws cloudwatch put-insight-rule \\",
+            "     --rule-name top-ips-alb \\",
+            "     --rule-state ENABLED \\",
+            "     --rule-definition '{",
+            '       "Schema": {',
+            '         "Name": "CloudWatchLogRule",',
+            '         "Version": 1',
+            "       },",
+            '       "LogGroupNames": ["/aws/elasticloadbalancing/app/my-alb"],',
+            '       "LogFormat": "CLF",',
+            '       "Fields": {',
+            '         "3": "client_ip"',
+            "       },",
+            '       "Contribution": {',
+            '         "Keys": ["client_ip"],',
+            '         "Filters": []',
+            "       }",
+            "     }'",
+            "",
+            "2. Créer rule pour top Lambda errors:",
+            "   Créer fichier lambda-errors-rule.json:",
+            """   {
+     \"Schema\": {
+       \"Name\": \"CloudWatchLogRule\",
+       \"Version\": 1
+     },
+     \"LogGroupNames\": [\"/aws/lambda/*\"],
+     \"LogFormat\": \"JSON\",
+     \"Fields\": {
+       \"error_type\": \"$.errorType\"
+     },
+     \"Contribution\": {
+       \"Keys\": [\"error_type\"],
+       \"Filters\": [
+         {
+           \"Match\": \"$.level\",
+           \"EqualTo\": \"ERROR\"
+         }
+       ]
+     }
+   }""",
+            "",
+            "   aws cloudwatch put-insight-rule \\",
+            "     --rule-name top-lambda-errors \\",
+            "     --rule-state ENABLED \\",
+            "     --rule-definition file://lambda-errors-rule.json",
+            "",
+            "3. Créer rule pour top DynamoDB throttles:",
+            "   aws cloudwatch put-insight-rule \\",
+            "     --rule-name dynamodb-throttles \\",
+            "     --rule-state ENABLED \\",
+            "     --rule-definition '{",
+            '       "Schema": {"Name": "CloudWatchMetricRule", "Version": 1},',
+            '       "AggregateOn": "Sum",',
+            '       "Contribution": {',
+            '         "Keys": ["TableName"],',
+            '         "Filters": [{"Match": "MetricName", "EqualTo": "UserErrors"}]',
+            "       },",
+            '       "Namespace": "AWS/DynamoDB"',
+            "     }'",
+            "",
+            "4. Créer rule pour VPC Flow Logs (top talkers):",
+            "   aws cloudwatch put-insight-rule \\",
+            "     --rule-name vpc-top-talkers \\",
+            "     --rule-state ENABLED \\",
+            "     --rule-definition '{",
+            '       "Schema": {"Name": "CloudWatchLogRule", "Version": 1},',
+            '       "LogGroupNames": ["/aws/vpc/flowlogs"],',
+            '       "LogFormat": "CLF",',
+            '       "Fields": {"3": "source_ip", "4": "dest_ip"},',
+            '       "Contribution": {',
+            '         "Keys": ["source_ip"],',
+            '         "Filters": [{"Match": "$7", "GreaterThan": 1000}]',
+            "       }",
+            "     }'",
+            "",
+            "5. Créer rule pour CloudTrail (top IAM users par API calls):",
+            "   aws cloudwatch put-insight-rule \\",
+            "     --rule-name cloudtrail-top-users \\",
+            "     --rule-state ENABLED \\",
+            "     --rule-definition '{",
+            '       "Schema": {"Name": "CloudWatchLogRule", "Version": 1},',
+            '       "LogGroupNames": ["CloudTrail/logs"],',
+            '       "LogFormat": "JSON",',
+            '       "Fields": {"user": "$.userIdentity.principalId"},',
+            '       "Contribution": {"Keys": ["user"]}',
+            "     }'",
+            "",
+            "6. Visualiser Contributor Insights dans Dashboard:",
+            "   aws cloudwatch put-dashboard \\",
+            "     --dashboard-name contributor-insights-dashboard \\",
+            "     --dashboard-body '{",
+            '       "widgets": [{',
+            '         "type": "log",',
+            '         "properties": {',
+            '           "query": "SOURCE \\\"top-ips-alb\\\"",',
+            '           "region": "us-east-1",',
+            '           "title": "Top IPs by Requests"',
+            "         }",
+            "       }]",
+            "     }'",
+            "",
+            "7. Lister toutes Contributor Insights rules:",
+            "   aws cloudwatch describe-insight-rules",
+            "",
+            "8. Obtenir report des top contributors:",
+            "   aws cloudwatch get-insight-rule-report \\",
+            "     --rule-name top-ips-alb \\",
+            "     --start-time $(date -d '1 hour ago' +%s) \\",
+            "     --end-time $(date +%s) \\",
+            "     --period 3600",
+            "",
+            "9. Créer alarme basée sur Contributor Insights:",
+            "   # Alarme si un IP unique génère > 10000 requests",
+            "   aws cloudwatch put-metric-alarm \\",
+            "     --alarm-name high-requests-single-ip \\",
+            "     --alarm-description 'Single IP generating excessive requests' \\",
+            "     --namespace AWS/Logs \\",
+            "     --metric-name UniqueContributors \\",
+            "     --dimensions Name=RuleName,Value=top-ips-alb \\",
+            "     --statistic Maximum \\",
+            "     --period 300 \\",
+            "     --evaluation-periods 1 \\",
+            "     --threshold 10000 \\",
+            "     --comparison-operator GreaterThanThreshold",
+            "",
+            "10. Automated reporting avec EventBridge:",
+            "    # Scheduler rule pour daily Contributor Insights report",
+            "    aws events put-rule \\",
+            "      --name daily-contributor-insights-report \\",
+            "      --schedule-expression 'cron(0 9 * * ? *)'",
+            "",
+            "    # Lambda target pour générer et envoyer report",
+            "    aws events put-targets \\",
+            "      --rule daily-contributor-insights-report \\",
+            "      --targets 'Id=1,Arn=arn:aws:lambda:region:account:function:generate-report'"
+        ],
+        verification_steps=[
+            "1. Lister toutes Contributor Insights rules actives:",
+            "   aws cloudwatch describe-insight-rules \\",
+            "     --query 'InsightRules[?State==`ENABLED`].[Name,State]' \\",
+            "     --output table",
+            "",
+            "2. Vérifier rule status et configuration:",
+            "   aws cloudwatch describe-insight-rules \\",
+            "     --rule-names top-ips-alb",
+            "",
+            "3. Obtenir top contributors report:",
+            "   aws cloudwatch get-insight-rule-report \\",
+            "     --rule-name top-ips-alb \\",
+            "     --start-time $(date -d '24 hours ago' +%s) \\",
+            "     --end-time $(date +%s) \\",
+            "     --period 86400 \\",
+            "     --max-contributor-count 10",
+            "",
+            "4. Visualiser dans CloudWatch Console:",
+            "   # CloudWatch > Insights > Contributor Insights",
+            "   # Vérifier rules listées et graphs visibles",
+            "",
+            "5. Vérifier data points générés:",
+            "   aws cloudwatch get-metric-statistics \\",
+            "     --namespace AWS/Logs \\",
+            "     --metric-name UniqueContributors \\",
+            "     --dimensions Name=RuleName,Value=top-ips-alb \\",
+            "     --start-time $(date -d '1 hour ago' -u +%Y-%m-%dT%H:%M:%S) \\",
+            "     --end-time $(date -u +%Y-%m-%dT%H:%M:%S) \\",
+            "     --period 3600 \\",
+            "     --statistics Sum",
+            "",
+            "6. Test rule avec sample data:",
+            "   # Générer logs test avec patterns attendus",
+            "   # Vérifier rule identifie contributors correctement",
+            "",
+            "7. Vérifier performance impact:",
+            "   # Contributor Insights pricing: $0.50 per rule per month",
+            "   # Check billing pour éviter surprises",
+            "",
+            "8. Auditer toutes log groups ont Contributor Insights:",
+            "   aws logs describe-log-groups \\",
+            "     --query 'logGroups[?!contains(logGroupName, `/aws/`)]' \\",
+            "   # Identifier log groups manquant rules",
+            "",
+            "9. Tester anomaly detection:",
+            "   # Simuler spike requests depuis single IP",
+            "   # Vérifier rule détecte anomaly rapidement",
+            "",
+            "10. Vérifier integration avec dashboards:",
+            "    # Dashboard doit montrer top contributors en temps réel",
+            "    # Auto-refresh activé (30s/1min)"
+        ],
+        references=[
+            "https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/ContributorInsights.html",
+            "https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/ContributorInsights-RuleSyntax.html",
+            "https://aws.amazon.com/blogs/mt/introducing-amazon-cloudwatch-contributor-insights/",
+            "https://aws.amazon.com/cloudwatch/pricing/"
+        ]
+    ),
+
+    Question(
+        id="CW-006",
+        question="CloudWatch Synthetics Canaries déployés pour monitoring proactif endpoints, APIs, et user workflows?",
+        description="Vérifier utilisation Canaries pour synthetic monitoring, uptime checks, et validation E2E user journeys",
+        severity="HIGH",
+        category="CloudWatch",
+        compliance=["Proactive Monitoring", "SLA Validation", "User Experience"],
+        technical_details="""
+        CloudWatch Synthetics Canaries = automated scripts monitoring endpoints
+
+        Fonctionnement:
+        1. Canary Types:
+           - Heartbeat: simple ping check (uptime monitoring)
+           - API Canary: REST API validation (response time, status codes)
+           - Broken Link Checker: crawl site, find 404s
+           - Visual Monitoring: screenshot comparison (UI regression)
+           - Multi-Step API: workflow testing (login → action → logout)
+
+        2. Runtime:
+           - Node.js (Puppeteer pour browser automation)
+           - Python (Selenium pour complex workflows)
+           - Execution schedule: 1min → 1 hour intervals
+
+        3. Validation:
+           - Response time < SLA threshold
+           - HTTP status codes (200, 404, 500)
+           - Response body contains expected strings
+           - SSL certificate validity
+           - DNS resolution time
+
+        4. Alerting:
+           - CloudWatch Alarms sur SuccessPercent < 100%
+           - SNS notifications sur failures
+           - Integration PagerDuty/Opsgenie
+
+        Use Cases:
+        - API uptime monitoring (before customers notice)
+        - E2E workflow validation (checkout, payment)
+        - Third-party dependency monitoring
+        - Multi-region availability checks
+        - SSL certificate expiration alerts
+
+        Avantages vs external monitoring:
+        - AWS-native (pas besoin Pingdom, Datadog)
+        - Multi-region execution
+        - VPC support (private endpoints)
+        - Screenshots + HAR files pour debugging
+        - Integration CloudWatch metrics/alarms
+
+        Compliance:
+        - SLA validation (99.9% uptime)
+        - Proactive monitoring (detect before users)
+        - User experience monitoring
+        """,
+        remediation=[
+            "1. Créer Heartbeat Canary (simple uptime check):",
+            "   aws synthetics create-canary \\",
+            "     --name api-heartbeat-canary \\",
+            "     --artifact-s3-location s3://my-canary-results/ \\",
+            "     --execution-role-arn arn:aws:iam::account:role/CloudWatchSyntheticsRole \\",
+            "     --schedule 'Expression=rate(5 minutes)' \\",
+            "     --runtime-version syn-nodejs-puppeteer-3.9 \\",
+            "     --code '{",
+            '       "Handler": "index.handler",',
+            '       "Script": "const synthetics = require(\\"Synthetics\\"); const log = require(\\"SyntheticsLogger\\"); const https = require(\\"https\\"); const apiCanaryBlueprint = async function () { const url = \\"https://api.example.com/health\\"; await synthetics.executeHttpStep(\\"Verify API\\", url); }; exports.handler = async () => { return await apiCanaryBlueprint(); };"',
+            "     }'",
+            "",
+            "2. Créer API Canary avec validation response:",
+            "   Créer fichier api-canary.js:",
+            """   const synthetics = require('Synthetics');
+   const log = require('SyntheticsLogger');
+
+   const apiCanary = async function () {
+       // Step 1: Health check
+       const healthCheck = await synthetics.executeHttpStep('Health Check',
+           'https://api.example.com/health',
+           {
+               method: 'GET',
+               headers: {'x-api-key': process.env.API_KEY}
+           }
+       );
+
+       // Validate response
+       if (healthCheck.statusCode !== 200) {
+           throw new Error('Health check failed');
+       }
+
+       // Step 2: Validate API endpoint
+       const apiResponse = await synthetics.executeHttpStep('Get Users API',
+           'https://api.example.com/users',
+           {
+               method: 'GET',
+               headers: {'Authorization': 'Bearer ' + process.env.AUTH_TOKEN}
+           }
+       );
+
+       // Validate response time
+       if (apiResponse.responseTime > 2000) {
+           log.warn('API response time exceeded 2 seconds');
+       }
+
+       // Validate response body
+       const users = JSON.parse(apiResponse.responseBody);
+       if (!Array.isArray(users) || users.length === 0) {
+           throw new Error('Users API returned invalid data');
+       }
+   };
+
+   exports.handler = async () => {
+       return await apiCanary();
+   };""",
+            "",
+            "   # Packager et déployer:",
+            "   zip api-canary.zip api-canary.js",
+            "   aws s3 cp api-canary.zip s3://my-canary-scripts/",
+            "",
+            "   aws synthetics create-canary \\",
+            "     --name api-validation-canary \\",
+            "     --artifact-s3-location s3://my-canary-results/ \\",
+            "     --execution-role-arn arn:aws:iam::account:role/CloudWatchSyntheticsRole \\",
+            "     --schedule 'Expression=rate(5 minutes)' \\",
+            "     --runtime-version syn-nodejs-puppeteer-3.9 \\",
+            "     --code 'S3Bucket=my-canary-scripts,S3Key=api-canary.zip,Handler=api-canary.handler'",
+            "",
+            "3. Créer Visual Monitoring Canary (UI regression):",
+            "   Créer fichier visual-canary.js:",
+            """   const synthetics = require('Synthetics');
+   const log = require('SyntheticsLogger');
+
+   const visualCanary = async function () {
+       const page = await synthetics.getPage();
+
+       // Navigate to page
+       await synthetics.executeStep('Navigate', async () => {
+           await page.goto('https://www.example.com', {waitUntil: 'networkidle0'});
+       });
+
+       // Take screenshot
+       await synthetics.takeScreenshot('homepage', 'loaded');
+
+       // Validate critical elements present
+       await synthetics.executeStep('Validate Elements', async () => {
+           await page.waitForSelector('#login-button', {timeout: 5000});
+           await page.waitForSelector('#search-box', {timeout: 5000});
+       });
+   };
+
+   exports.handler = async () => {
+       return await visualCanary();
+   };""",
+            "",
+            "4. Créer Multi-Step E2E Workflow Canary (login → checkout):",
+            "   Créer fichier e2e-canary.js:",
+            """   const synthetics = require('Synthetics');
+
+   const e2eCanary = async function () {
+       const page = await synthetics.getPage();
+
+       // Step 1: Login
+       await synthetics.executeStep('Login', async () => {
+           await page.goto('https://app.example.com/login');
+           await page.type('#email', process.env.TEST_USER_EMAIL);
+           await page.type('#password', process.env.TEST_USER_PASSWORD);
+           await page.click('#login-button');
+           await page.waitForNavigation();
+       });
+
+       // Step 2: Add to cart
+       await synthetics.executeStep('Add to Cart', async () => {
+           await page.goto('https://app.example.com/products/test-product');
+           await page.click('#add-to-cart');
+           await page.waitForSelector('.cart-success');
+       });
+
+       // Step 3: Checkout
+       await synthetics.executeStep('Checkout', async () => {
+           await page.goto('https://app.example.com/checkout');
+           await page.waitForSelector('#order-summary');
+           // Validate order total > 0
+           const total = await page.$eval('#order-total', el => el.textContent);
+           if (parseFloat(total) <= 0) {
+               throw new Error('Invalid order total');
+           }
+       });
+   };
+
+   exports.handler = async () => {
+       return await e2eCanary();
+   };""",
+            "",
+            "5. Configurer Canary avec VPC (private endpoint monitoring):",
+            "   aws synthetics create-canary \\",
+            "     --name internal-api-canary \\",
+            "     --vpc-config 'SubnetIds=subnet-xxx,subnet-yyy,SecurityGroupIds=sg-zzz' \\",
+            "     --artifact-s3-location s3://my-canary-results/ \\",
+            "     --execution-role-arn arn:aws:iam::account:role/CloudWatchSyntheticsRole \\",
+            "     --schedule 'Expression=rate(5 minutes)' \\",
+            "     --runtime-version syn-nodejs-puppeteer-3.9 \\",
+            "     --code 'Handler=index.handler,Script=...'",
+            "",
+            "6. Créer CloudWatch Alarm sur Canary failures:",
+            "   aws cloudwatch put-metric-alarm \\",
+            "     --alarm-name api-canary-failure \\",
+            "     --alarm-description 'API Canary failing' \\",
+            "     --namespace CloudWatchSynthetics \\",
+            "     --metric-name SuccessPercent \\",
+            "     --dimensions Name=CanaryName,Value=api-heartbeat-canary \\",
+            "     --statistic Average \\",
+            "     --period 300 \\",
+            "     --evaluation-periods 2 \\",
+            "     --threshold 100 \\",
+            "     --comparison-operator LessThanThreshold \\",
+            "     --alarm-actions arn:aws:sns:region:account:canary-alerts",
+            "",
+            "7. Créer multi-region Canary (availability check):",
+            "   # Déployer même Canary dans us-east-1, eu-west-1, ap-southeast-1",
+            "   for region in us-east-1 eu-west-1 ap-southeast-1; do",
+            "       aws synthetics create-canary \\",
+            "         --region $region \\",
+            "         --name api-canary-$region \\",
+            "         --artifact-s3-location s3://canary-results-$region/ \\",
+            "         ...",
+            "   done",
+            "",
+            "8. Configurer environment variables (secrets):",
+            "   aws synthetics update-canary \\",
+            "     --name api-canary \\",
+            "     --run-config '{",
+            '       "EnvironmentVariables": {',
+            '         "API_KEY": "{{resolve:secretsmanager:api-key}}",',
+            '         "AUTH_TOKEN": "{{resolve:secretsmanager:auth-token}}"',
+            "       }",
+            "     }'",
+            "",
+            "9. Activer Canary et start monitoring:",
+            "   aws synthetics start-canary --name api-heartbeat-canary",
+            "",
+            "10. Créer Dashboard avec Canary metrics:",
+            "    aws cloudwatch put-dashboard \\",
+            "      --dashboard-name canary-monitoring \\",
+            "      --dashboard-body '{",
+            '        "widgets": [',
+            "          {",
+            '            "type": "metric",',
+            '            "properties": {',
+            '              "metrics": [',
+            '                ["CloudWatchSynthetics", "SuccessPercent", {"stat": "Average"}],',
+            '                [".", "Duration", {"stat": "Average"}]',
+            "              ],",
+            '              "period": 300,',
+            '              "region": "us-east-1",',
+            '              "title": "Canary Health"',
+            "            }",
+            "          }",
+            "        ]",
+            "      }'"
+        ],
+        verification_steps=[
+            "1. Lister tous Canaries déployés:",
+            "   aws synthetics describe-canaries \\",
+            "     --query 'Canaries[].[Name,Status.State,Schedule.Expression]' \\",
+            "     --output table",
+            "",
+            "2. Vérifier dernier run d'un Canary:",
+            "   aws synthetics describe-canaries-last-run \\",
+            "     --query 'CanariesLastRun[?CanaryName==`api-heartbeat-canary`]'",
+            "",
+            "3. Obtenir détails dernière exécution:",
+            "   aws synthetics get-canary-runs \\",
+            "     --name api-heartbeat-canary \\",
+            "     --max-results 5",
+            "",
+            "4. Télécharger screenshots et HAR files (debugging):",
+            "   aws s3 sync s3://my-canary-results/api-heartbeat-canary/latest/ ./canary-results/",
+            "",
+            "5. Vérifier Canary metrics dans CloudWatch:",
+            "   aws cloudwatch get-metric-statistics \\",
+            "     --namespace CloudWatchSynthetics \\",
+            "     --metric-name SuccessPercent \\",
+            "     --dimensions Name=CanaryName,Value=api-heartbeat-canary \\",
+            "     --start-time $(date -d '24 hours ago' -u +%Y-%m-%dT%H:%M:%S) \\",
+            "     --end-time $(date -u +%Y-%m-%dT%H:%M:%S) \\",
+            "     --period 3600 \\",
+            "     --statistics Average",
+            "",
+            "6. Tester Canary manuellement:",
+            "   aws synthetics start-canary --name api-heartbeat-canary",
+            "",
+            "7. Vérifier alarmes configurées pour Canaries:",
+            "   aws cloudwatch describe-alarms \\",
+            "     --alarm-name-prefix api-canary",
+            "",
+            "8. Vérifier IAM role Canary a permissions requises:",
+            "   aws iam get-role --role-name CloudWatchSyntheticsRole",
+            "   # Doit avoir permissions: S3, CloudWatch Logs, VPC (si applicable)",
+            "",
+            "9. Test failure scenario:",
+            "   # Modifier Canary pour pointer vers URL invalide",
+            "   # Vérifier alarme triggered et SNS notification reçue",
+            "",
+            "10. Auditer tous endpoints critiques ont Canaries:",
+            "    # Lister APIs production",
+            "    # Vérifier chaque API a Canary monitoring",
+            "",
+            "11. Vérifier Canary run history (30 jours):",
+            "    aws synthetics get-canary-runs \\",
+            "      --name api-heartbeat-canary \\",
+            "      --max-results 100",
+            "",
+            "12. Check Canary pricing impact:",
+            "    # Synthetics pricing: $0.0012 per canary run",
+            "    # rate(5 minutes) = 288 runs/day = $0.35/day per canary",
+            "    # Calculer total cost tous canaries"
+        ],
+        references=[
+            "https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/CloudWatch_Synthetics_Canaries.html",
+            "https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/CloudWatch_Synthetics_Canaries_WritingCanary.html",
+            "https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/CloudWatch_Synthetics_Canaries_Blueprints.html",
+            "https://github.com/aws-samples/cloudwatch-synthetics-canary-examples",
+            "https://aws.amazon.com/cloudwatch/pricing/"
+        ]
     )
 ]
 
