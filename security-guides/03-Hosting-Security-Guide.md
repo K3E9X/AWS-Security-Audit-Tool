@@ -884,6 +884,1169 @@ def lambda_handler(event, context):
 
 ---
 
+## Scénarios d'Attaque et Mitigation Avancée
+
+### Attaque 1: SSRF via IMDSv1 pour Vol de Credentials IAM
+
+**Scénario:**
+Exploit d'une vulnérabilité SSRF (Server-Side Request Forgery) dans une application web pour accéder aux credentials IAM via IMDSv1.
+
+**Attack Chain:**
+
+```
+1. Découverte de la vulnérabilité SSRF
+   └─> Endpoint: /api/fetch?url=http://example.com
+
+2. Exploitation IMDSv1
+   └─> Payload: /api/fetch?url=http://169.254.169.254/latest/meta-data/iam/security-credentials/
+   └─> Réponse: MyEC2Role
+
+3. Vol de credentials
+   └─> Payload: /api/fetch?url=http://169.254.169.254/latest/meta-data/iam/security-credentials/MyEC2Role
+   └─> Réponse:
+   {
+     "AccessKeyId": "ASIA...",
+     "SecretAccessKey": "...",
+     "Token": "...",
+     "Expiration": "2025-11-08T12:00:00Z"
+   }
+
+4. Utilisation des credentials volés
+   └─> aws s3 ls (avec credentials volés)
+   └─> Exfiltration de données
+```
+
+**Exemple réel de code vulnérable:**
+
+```python
+# ❌ VULNÉRABLE - SSRF possible
+@app.route('/api/fetch')
+def fetch_url():
+    url = request.args.get('url')
+    response = requests.get(url)  # Pas de validation
+    return response.text
+
+# Exploitation:
+# GET /api/fetch?url=http://169.254.169.254/latest/meta-data/iam/security-credentials/MyRole
+```
+
+**Mitigation complète:**
+
+**1. Forcer IMDSv2 (bloque SSRF):**
+
+```bash
+# IMDSv2 requiert une requête PUT pour obtenir un token
+# Impossible via SSRF simple (GET only)
+
+# Activer IMDSv2 sur instance existante
+aws ec2 modify-instance-metadata-options \
+    --instance-id i-xxxxx \
+    --http-tokens required \
+    --http-put-response-hop-limit 1
+
+# Terraform pour nouvelles instances
+resource "aws_launch_template" "secure" {
+  name = "secure-launch-template"
+
+  metadata_options {
+    http_endpoint               = "enabled"
+    http_tokens                 = "required"  # Force IMDSv2
+    http_put_response_hop_limit = 1
+    instance_metadata_tags      = "enabled"
+  }
+}
+
+# Auto Scaling Group
+resource "aws_autoscaling_group" "main" {
+  launch_template {
+    id      = aws_launch_template.secure.id
+    version = "$Latest"
+  }
+}
+```
+
+**2. Validation URL côté application:**
+
+```python
+# ✅ SÉCURISÉ - Validation stricte
+from urllib.parse import urlparse
+import ipaddress
+
+BLOCKED_RANGES = [
+    ipaddress.ip_network('169.254.0.0/16'),   # IMDS
+    ipaddress.ip_network('10.0.0.0/8'),       # Private
+    ipaddress.ip_network('172.16.0.0/12'),    # Private
+    ipaddress.ip_network('192.168.0.0/16'),   # Private
+    ipaddress.ip_network('127.0.0.0/8'),      # Loopback
+]
+
+ALLOWED_DOMAINS = ['example.com', 'api.example.com']
+
+def is_url_safe(url):
+    """Valide qu'une URL n'est pas malveillante"""
+    try:
+        parsed = urlparse(url)
+
+        # Vérifier le schéma
+        if parsed.scheme not in ['http', 'https']:
+            return False
+
+        # Vérifier le domaine (whitelist)
+        if parsed.hostname not in ALLOWED_DOMAINS:
+            return False
+
+        # Résoudre l'IP
+        import socket
+        ip = ipaddress.ip_address(socket.gethostbyname(parsed.hostname))
+
+        # Vérifier que l'IP n'est pas dans une plage bloquée
+        for blocked_range in BLOCKED_RANGES:
+            if ip in blocked_range:
+                return False
+
+        return True
+    except Exception as e:
+        return False
+
+@app.route('/api/fetch')
+def fetch_url():
+    url = request.args.get('url')
+
+    if not is_url_safe(url):
+        return {'error': 'Invalid URL'}, 400
+
+    response = requests.get(url, timeout=5)
+    return response.text
+```
+
+**3. Alarmes CloudWatch pour détection:**
+
+```bash
+# Filtre CloudTrail pour utilisation suspecte de credentials
+aws logs put-metric-filter \
+    --log-group-name /aws/cloudtrail/logs \
+    --filter-name suspicious-credential-usage \
+    --filter-pattern '[..., userIdentity.type = "AssumedRole", userIdentity.principalId != "i-*", eventName = "AssumeRole"]' \
+    --metric-transformations \
+        metricName=SuspiciousCredentialUsage,\
+        metricNamespace=Security,\
+        metricValue=1
+
+# Alarme
+aws cloudwatch put-metric-alarm \
+    --alarm-name ssrf-credential-theft-detected \
+    --metric-name SuspiciousCredentialUsage \
+    --namespace Security \
+    --statistic Sum \
+    --period 300 \
+    --threshold 1 \
+    --comparison-operator GreaterThanOrEqualToThreshold \
+    --evaluation-periods 1 \
+    --alarm-actions arn:aws:sns:us-east-1:123456789012:SecurityAlerts
+```
+
+**4. GuardDuty détection:**
+
+GuardDuty détecte automatiquement:
+- `UnauthorizedAccess:IAMUser/InstanceCredentialExfiltration.OutsideAWS`
+- `UnauthorizedAccess:IAMUser/InstanceCredentialExfiltration.InsideAWS`
+
+---
+
+### Attaque 2: Container Escape via Kernel Exploit
+
+**Scénario:**
+Attaquant avec accès à un container privilégié exploite une vulnérabilité kernel pour s'échapper et accéder à l'hôte EC2.
+
+**Indicateurs:**
+- Container en mode `privileged: true`
+- Capabilities Linux non restreintes
+- `hostPath` volumes montés
+- `securityContext.allowPrivilegeEscalation: true`
+
+**Exploit exemple (CVE-2022-0847 "Dirty Pipe"):**
+
+```bash
+# Depuis un container privilégié
+# 1. Vérifier les capabilities
+capsh --print
+
+# 2. Exploiter la vulnérabilité kernel
+./dirty_pipe_exploit
+
+# 3. Escape vers l'hôte
+# Accès complet au système hôte
+cat /host/etc/shadow
+```
+
+**Mitigation complète:**
+
+**1. Désactiver mode privilégié (ECS):**
+
+```json
+{
+  "family": "secure-task",
+  "containerDefinitions": [
+    {
+      "name": "app",
+      "image": "myapp:latest",
+      "privileged": false,  // ✅ JAMAIS privileged
+      "readonlyRootFilesystem": true,
+      "user": "1000:1000",
+      "linuxParameters": {
+        "capabilities": {
+          "drop": ["ALL"],  // Drop toutes les capabilities
+          "add": []         // N'en ajouter aucune (sauf si absolument nécessaire)
+        }
+      }
+    }
+  ],
+  "taskRoleArn": "arn:aws:iam::123456789012:role/TaskRole",
+  "executionRoleArn": "arn:aws:iam::123456789012:role/ExecutionRole"
+}
+```
+
+**2. Pod Security Standards (Kubernetes/EKS):**
+
+```yaml
+# Baseline Policy - Minimum sécurité
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: production
+  labels:
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+
+---
+# Restricted Pod (maximum sécurité)
+apiVersion: v1
+kind: Pod
+metadata:
+  name: secure-app
+  namespace: production
+spec:
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    fsGroup: 2000
+    seccompProfile:
+      type: RuntimeDefault
+    supplementalGroups: [3000]
+
+  containers:
+  - name: app
+    image: myapp:latest
+    securityContext:
+      allowPrivilegeEscalation: false
+      readOnlyRootFilesystem: true
+      runAsNonRoot: true
+      runAsUser: 1000
+      capabilities:
+        drop:
+        - ALL
+      seccompProfile:
+        type: RuntimeDefault
+
+    # Volume temporaire pour /tmp (readOnly filesystem)
+    volumeMounts:
+    - name: tmp
+      mountPath: /tmp
+
+  volumes:
+  - name: tmp
+    emptyDir: {}
+```
+
+**3. OPA Gatekeeper pour enforcement (EKS):**
+
+```yaml
+# Constraint Template: Bloquer containers privilégiés
+apiVersion: templates.gatekeeper.sh/v1
+kind: ConstraintTemplate
+metadata:
+  name: k8spspprivileged
+spec:
+  crd:
+    spec:
+      names:
+        kind: K8sPSPPrivileged
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package k8spspprivileged
+
+        violation[{"msg": msg}] {
+          c := input.review.object.spec.containers[_]
+          c.securityContext.privileged
+          msg := sprintf("Privileged container not allowed: %v", [c.name])
+        }
+
+        violation[{"msg": msg}] {
+          c := input.review.object.spec.containers[_]
+          c.securityContext.allowPrivilegeEscalation
+          msg := sprintf("Privilege escalation not allowed: %v", [c.name])
+        }
+
+---
+# Constraint: Appliquer la politique
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sPSPPrivileged
+metadata:
+  name: psp-privileged-constraint
+spec:
+  match:
+    kinds:
+      - apiGroups: [""]
+        kinds: ["Pod"]
+    namespaces:
+      - production
+      - staging
+```
+
+**4. Scan runtime avec Falco:**
+
+```yaml
+# Règle Falco pour détecter container escape
+- rule: Container Drift Detected
+  desc: Detect file modifications in running containers
+  condition: >
+    container and
+    not container.privileged and
+    (open_write or rename or unlink) and
+    container.image.repository in (production_images)
+  output: "File modified in container (user=%user.name command=%proc.cmdline file=%fd.name container=%container.name image=%container.image.repository)"
+  priority: WARNING
+
+- rule: Privilege Escalation Attempt
+  desc: Detect attempts to gain privilege
+  condition: >
+    spawned_process and
+    proc.name in (sudo, su, doas) and
+    container and
+    not user.name = root
+  output: "Privilege escalation attempt (user=%user.name command=%proc.cmdline container=%container.name)"
+  priority: CRITICAL
+```
+
+**5. Inspector Runtime Monitoring:**
+
+```bash
+# Activer GuardDuty Runtime Monitoring pour ECS/EKS
+aws guardduty update-detector \
+    --detector-id <id> \
+    --features '[{
+        "Name": "RUNTIME_MONITORING",
+        "Status": "ENABLED",
+        "AdditionalConfiguration": [{
+            "Name": "ECS_FARGATE_AGENT_MANAGEMENT",
+            "Status": "ENABLED"
+        }, {
+            "Name": "EKS_ADDON_MANAGEMENT",
+            "Status": "ENABLED"
+        }]
+    }]'
+
+# Détections automatiques:
+# - Execution:Runtime/NewBinaryExecuted
+# - PrivilegeEscalation:Runtime/ContainerMountsHostDirectory
+# - DefenseEvasion:Runtime/FilelessExecution
+```
+
+---
+
+### Attaque 3: Lambda Code Injection via Event Poisoning
+
+**Scénario:**
+Injection de code malveillant dans une fonction Lambda via des événements non validés (S3, SQS, API Gateway).
+
+**Exemple d'attaque:**
+
+```python
+# ❌ Code Lambda VULNÉRABLE
+import subprocess
+
+def lambda_handler(event, context):
+    # Event depuis S3: {"Records": [{"s3": {"object": {"key": "file.txt"}}}]}
+    file_key = event['Records'][0]['s3']['object']['key']
+
+    # DANGEREUX: Injection de commande
+    result = subprocess.run(f"aws s3 cp s3://my-bucket/{file_key} /tmp/", shell=True)
+
+# Exploitation:
+# Upload fichier avec key: "file.txt; rm -rf / #"
+# Commande exécutée: aws s3 cp s3://my-bucket/file.txt; rm -rf / # /tmp/
+```
+
+**Mitigation:**
+
+**1. Validation stricte des événements:**
+
+```python
+# ✅ Code Lambda SÉCURISÉ
+import json
+import re
+import boto3
+from jsonschema import validate, ValidationError
+
+# Schéma JSON pour validation
+S3_EVENT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "Records": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "s3": {
+                        "type": "object",
+                        "properties": {
+                            "object": {
+                                "type": "object",
+                                "properties": {
+                                    "key": {"type": "string", "pattern": "^[a-zA-Z0-9_\\-\\.]+$"}
+                                },
+                                "required": ["key"]
+                            }
+                        },
+                        "required": ["object"]
+                    }
+                },
+                "required": ["s3"]
+            }
+        }
+    },
+    "required": ["Records"]
+}
+
+def lambda_handler(event, context):
+    try:
+        # Valider le schéma
+        validate(instance=event, schema=S3_EVENT_SCHEMA)
+    except ValidationError as e:
+        print(f"Invalid event: {e.message}")
+        raise
+
+    # Extraire et valider le key
+    file_key = event['Records'][0]['s3']['object']['key']
+
+    # Validation additionnelle
+    if not re.match(r'^[a-zA-Z0-9_\-\.]+$', file_key):
+        raise ValueError(f"Invalid file key: {file_key}")
+
+    # Utiliser boto3 au lieu de subprocess
+    s3 = boto3.client('s3')
+    s3.download_file('my-bucket', file_key, f'/tmp/{file_key}')
+```
+
+**2. Sandbox Lambda avec Resource Policies:**
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "Service": "s3.amazonaws.com"
+      },
+      "Action": "lambda:InvokeFunction",
+      "Resource": "arn:aws:lambda:us-east-1:123456789012:function:MyFunction",
+      "Condition": {
+        "StringEquals": {
+          "AWS:SourceAccount": "123456789012"
+        },
+        "ArnLike": {
+          "AWS:SourceArn": "arn:aws:s3:::my-trusted-bucket"
+        }
+      }
+    }
+  ]
+}
+```
+
+**3. Limits et timeouts:**
+
+```yaml
+# SAM Template avec sécurité renforcée
+Resources:
+  ProcessFileFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: app.lambda_handler
+      Runtime: python3.11
+      Timeout: 30  # Max 30 secondes
+      MemorySize: 256
+      ReservedConcurrentExecutions: 10  # Limite concurrence
+
+      Environment:
+        Variables:
+          ALLOWED_EXTENSIONS: ".txt,.csv,.json"
+
+      Policies:
+        - S3ReadPolicy:
+            BucketName: my-bucket
+        - Statement:
+            - Effect: Allow
+              Action:
+                - logs:CreateLogGroup
+                - logs:CreateLogStream
+                - logs:PutLogEvents
+              Resource: "*"
+
+      Events:
+        S3Event:
+          Type: S3
+          Properties:
+            Bucket: !Ref SourceBucket
+            Events: s3:ObjectCreated:*
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: suffix
+                    Value: .txt
+```
+
+---
+
+## Architecture de Référence Complète: EKS Production
+
+### 1. Cluster EKS Sécurisé avec Terraform
+
+```hcl
+# eks-cluster.tf - Production-ready EKS
+
+terraform {
+  required_version = ">= 1.0"
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
+    }
+    kubernetes = {
+      source  = "hashicorp/kubernetes"
+      version = "~> 2.20"
+    }
+  }
+}
+
+# KMS Key pour chiffrement secrets EKS
+resource "aws_kms_key" "eks" {
+  description             = "EKS Secret Encryption Key"
+  deletion_window_in_days = 30
+  enable_key_rotation     = true
+
+  tags = {
+    Name = "eks-secret-encryption-key"
+  }
+}
+
+resource "aws_kms_alias" "eks" {
+  name          = "alias/eks-secret-key"
+  target_key_id = aws_kms_key.eks.key_id
+}
+
+# EKS Cluster
+resource "aws_eks_cluster" "main" {
+  name     = "production-eks"
+  role_arn = aws_iam_role.eks_cluster.arn
+  version  = "1.28"
+
+  vpc_config {
+    subnet_ids              = concat(var.private_subnet_ids, var.public_subnet_ids)
+    endpoint_private_access = true
+    endpoint_public_access  = true  # Restreindre avec public_access_cidrs en prod
+    public_access_cidrs     = ["203.0.113.0/24"]  # IP bureau uniquement
+
+    security_group_ids = [aws_security_group.eks_cluster.id]
+  }
+
+  # Chiffrement des secrets Kubernetes avec KMS
+  encryption_config {
+    provider {
+      key_arn = aws_kms_key.eks.arn
+    }
+    resources = ["secrets"]
+  }
+
+  # Logging activé
+  enabled_cluster_log_types = ["api", "audit", "authenticator", "controllerManager", "scheduler"]
+
+  depends_on = [
+    aws_iam_role_policy_attachment.eks_cluster_policy,
+    aws_cloudwatch_log_group.eks
+  ]
+
+  tags = {
+    Environment = "production"
+  }
+}
+
+# CloudWatch Log Group pour logs EKS
+resource "aws_cloudwatch_log_group" "eks" {
+  name              = "/aws/eks/production-eks/cluster"
+  retention_in_days = 90
+
+  tags = {
+    Name = "eks-cluster-logs"
+  }
+}
+
+# Managed Node Group (Graviton pour coût/performance)
+resource "aws_eks_node_group" "main" {
+  cluster_name    = aws_eks_cluster.main.name
+  node_group_name = "production-nodes"
+  node_role_arn   = aws_iam_role.eks_node_group.arn
+  subnet_ids      = var.private_subnet_ids
+
+  scaling_config {
+    desired_size = 3
+    max_size     = 10
+    min_size     = 2
+  }
+
+  update_config {
+    max_unavailable = 1
+  }
+
+  ami_type       = "AL2_ARM_64"  # Graviton
+  capacity_type  = "ON_DEMAND"
+  instance_types = ["t4g.medium"]
+
+  # Launch template pour sécurité
+  launch_template {
+    id      = aws_launch_template.eks_nodes.id
+    version = "$Latest"
+  }
+
+  labels = {
+    Environment = "production"
+  }
+
+  tags = {
+    Name = "eks-production-nodes"
+  }
+
+  depends_on = [
+    aws_iam_role_policy_attachment.eks_worker_node_policy,
+    aws_iam_role_policy_attachment.eks_cni_policy,
+    aws_iam_role_policy_attachment.eks_container_registry_policy,
+  ]
+}
+
+# Launch Template sécurisé pour nodes
+resource "aws_launch_template" "eks_nodes" {
+  name = "eks-node-launch-template"
+
+  metadata_options {
+    http_endpoint               = "enabled"
+    http_tokens                 = "required"  # IMDSv2
+    http_put_response_hop_limit = 1
+  }
+
+  block_device_mappings {
+    device_name = "/dev/xvda"
+
+    ebs {
+      volume_size           = 50
+      volume_type           = "gp3"
+      encrypted             = true
+      kms_key_id            = aws_kms_key.ebs.arn
+      delete_on_termination = true
+    }
+  }
+
+  monitoring {
+    enabled = true
+  }
+
+  tag_specifications {
+    resource_type = "instance"
+    tags = {
+      Name = "eks-worker-node"
+    }
+  }
+}
+
+# Security Group Cluster
+resource "aws_security_group" "eks_cluster" {
+  name        = "eks-cluster-sg"
+  description = "Security group for EKS cluster"
+  vpc_id      = var.vpc_id
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name = "eks-cluster-security-group"
+  }
+}
+
+# Security Group règles
+resource "aws_security_group_rule" "cluster_ingress_workstation_https" {
+  description       = "Allow workstation to communicate with the cluster API Server"
+  type              = "ingress"
+  from_port         = 443
+  to_port           = 443
+  protocol          = "tcp"
+  cidr_blocks       = ["203.0.113.0/24"]  # IP bureau
+  security_group_id = aws_security_group.eks_cluster.id
+}
+
+# IAM Role pour Cluster
+resource "aws_iam_role" "eks_cluster" {
+  name = "eks-cluster-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Principal = {
+        Service = "eks.amazonaws.com"
+      }
+      Action = "sts:AssumeRole"
+    }]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "eks_cluster_policy" {
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEKSClusterPolicy"
+  role       = aws_iam_role.eks_cluster.name
+}
+
+# IAM Role pour Node Group
+resource "aws_iam_role" "eks_node_group" {
+  name = "eks-node-group-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Principal = {
+        Service = "ec2.amazonaws.com"
+      }
+      Action = "sts:AssumeRole"
+    }]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "eks_worker_node_policy" {
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy"
+  role       = aws_iam_role.eks_node_group.name
+}
+
+resource "aws_iam_role_policy_attachment" "eks_cni_policy" {
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy"
+  role       = aws_iam_role.eks_node_group.name
+}
+
+resource "aws_iam_role_policy_attachment" "eks_container_registry_policy" {
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"
+  role       = aws_iam_role.eks_node_group.name
+}
+
+# OIDC Provider pour IRSA (IAM Roles for Service Accounts)
+data "tls_certificate" "eks" {
+  url = aws_eks_cluster.main.identity[0].oidc[0].issuer
+}
+
+resource "aws_iam_openid_connect_provider" "eks" {
+  client_id_list  = ["sts.amazonaws.com"]
+  thumbprint_list = [data.tls_certificate.eks.certificates[0].sha1_fingerprint]
+  url             = aws_eks_cluster.main.identity[0].oidc[0].issuer
+
+  tags = {
+    Name = "eks-oidc-provider"
+  }
+}
+
+# Outputs
+output "cluster_endpoint" {
+  value = aws_eks_cluster.main.endpoint
+}
+
+output "cluster_certificate_authority_data" {
+  value = aws_eks_cluster.main.certificate_authority[0].data
+}
+
+output "cluster_oidc_issuer_url" {
+  value = aws_eks_cluster.main.identity[0].oidc[0].issuer
+}
+```
+
+### 2. Add-ons Sécurité EKS
+
+```hcl
+# AWS Load Balancer Controller (Ingress)
+resource "aws_eks_addon" "aws_load_balancer_controller" {
+  cluster_name = aws_eks_cluster.main.name
+  addon_name   = "aws-load-balancer-controller"
+  addon_version = "v2.6.0-eksbuild.1"
+}
+
+# EBS CSI Driver (chiffrement volumes)
+resource "aws_eks_addon" "ebs_csi_driver" {
+  cluster_name = aws_eks_cluster.main.name
+  addon_name   = "aws-ebs-csi-driver"
+  addon_version = "v1.24.0-eksbuild.1"
+}
+
+# CoreDNS
+resource "aws_eks_addon" "coredns" {
+  cluster_name = aws_eks_cluster.main.name
+  addon_name   = "coredns"
+  addon_version = "v1.10.1-eksbuild.2"
+}
+
+# VPC CNI
+resource "aws_eks_addon" "vpc_cni" {
+  cluster_name = aws_eks_cluster.main.name
+  addon_name   = "vpc-cni"
+  addon_version = "v1.15.0-eksbuild.1"
+
+  configuration_values = jsonencode({
+    env = {
+      ENABLE_POD_ENI                    = "true"
+      ENABLE_PREFIX_DELEGATION          = "true"
+      WARM_PREFIX_TARGET                = "1"
+      AWS_VPC_K8S_CNI_EXTERNALSNAT      = "true"
+      AWS_VPC_K8S_CNI_CUSTOM_NETWORK_CFG = "true"
+    }
+  })
+}
+
+# GuardDuty pour EKS
+resource "aws_guardduty_detector" "main" {
+  enable = true
+
+  datasources {
+    kubernetes {
+      audit_logs {
+        enable = true
+      }
+    }
+  }
+
+  tags = {
+    Name = "eks-guardduty-detector"
+  }
+}
+```
+
+### 3. Network Policies Kubernetes
+
+```yaml
+# default-deny-all.yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: production
+spec:
+  podSelector: {}
+  policyTypes:
+  - Ingress
+  - Egress
+
+---
+# allow-frontend-to-backend.yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-frontend-to-backend
+  namespace: production
+spec:
+  podSelector:
+    matchLabels:
+      app: backend
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          app: frontend
+    ports:
+    - protocol: TCP
+      port: 8080
+
+---
+# allow-backend-to-database.yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-backend-to-db
+  namespace: production
+spec:
+  podSelector:
+    matchLabels:
+      app: backend
+  policyTypes:
+  - Egress
+  egress:
+  - to:
+    - podSelector:
+        matchLabels:
+          app: database
+    ports:
+    - protocol: TCP
+      port: 3306
+
+---
+# allow-dns.yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-access
+  namespace: production
+spec:
+  podSelector: {}
+  policyTypes:
+  - Egress
+  egress:
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          name: kube-system
+    - podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+    ports:
+    - protocol: UDP
+      port: 53
+```
+
+---
+
+## Monitoring et Détection Avancée
+
+### 1. CloudWatch Container Insights
+
+```bash
+# Activer Container Insights pour ECS
+aws ecs update-cluster-settings \
+    --cluster production-cluster \
+    --settings name=containerInsights,value=enabled
+
+# Installer CloudWatch Agent dans EKS
+kubectl apply -f https://raw.githubusercontent.com/aws-samples/amazon-cloudwatch-container-insights/latest/k8s-deployment-manifest-templates/deployment-mode/daemonset/container-insights-monitoring/quickstart/cwagent-fluentd-quickstart.yaml
+```
+
+**Métriques clés à surveiller:**
+
+```sql
+# CloudWatch Logs Insights - Pods crashant fréquemment
+fields @timestamp, kubernetes.pod_name, kubernetes.namespace_name, log
+| filter kubernetes.namespace_name = "production"
+| filter log like /error|exception|fatal/i
+| stats count(*) as error_count by kubernetes.pod_name
+| sort error_count desc
+| limit 20
+
+# Containers avec CPU throttling
+fields @timestamp, ContainerName, CpuUtilized, CpuReserved
+| filter CpuUtilized / CpuReserved > 0.8
+| stats avg(CpuUtilized / CpuReserved) as avg_cpu_util by ContainerName
+| sort avg_cpu_util desc
+
+# Détection OOMKilled
+fields @timestamp, kubernetes.pod_name, kubernetes.container_name, reason
+| filter reason = "OOMKilled"
+| stats count(*) as oom_count by kubernetes.pod_name
+| sort oom_count desc
+```
+
+### 2. Alarmes CloudWatch Critiques
+
+```bash
+# CPU Utilization élevé (EC2)
+aws cloudwatch put-metric-alarm \
+    --alarm-name high-cpu-ec2 \
+    --metric-name CPUUtilization \
+    --namespace AWS/EC2 \
+    --statistic Average \
+    --period 300 \
+    --threshold 80 \
+    --comparison-operator GreaterThanThreshold \
+    --evaluation-periods 2 \
+    --dimensions Name=InstanceId,Value=i-xxxxx \
+    --alarm-actions arn:aws:sns:us-east-1:123456789012:Alerts
+
+# Lambda errors élevé
+aws cloudwatch put-metric-alarm \
+    --alarm-name lambda-high-errors \
+    --metric-name Errors \
+    --namespace AWS/Lambda \
+    --statistic Sum \
+    --period 60 \
+    --threshold 10 \
+    --comparison-operator GreaterThanThreshold \
+    --evaluation-periods 1 \
+    --dimensions Name=FunctionName,Value=MyFunction \
+    --treat-missing-data notBreaching \
+    --alarm-actions arn:aws:sns:us-east-1:123456789012:Alerts
+
+# ECS Service healthy tasks < 2
+aws cloudwatch put-metric-alarm \
+    --alarm-name ecs-unhealthy-tasks \
+    --metric-name HealthyTaskCount \
+    --namespace ECS/ContainerInsights \
+    --statistic Average \
+    --period 60 \
+    --threshold 2 \
+    --comparison-operator LessThanThreshold \
+    --evaluation-periods 2 \
+    --dimensions Name=ServiceName,Value=my-service Name=ClusterName,Value=production \
+    --alarm-actions arn:aws:sns:us-east-1:123456789012:Alerts
+```
+
+### 3. Détection d'Anomalies avec CloudWatch Anomaly Detection
+
+```bash
+# Créer une alarme avec détection d'anomalies
+aws cloudwatch put-metric-alarm \
+    --alarm-name lambda-invocations-anomaly \
+    --comparison-operator LessThanLowerOrGreaterThanUpperThreshold \
+    --evaluation-periods 2 \
+    --metrics file://anomaly-detection-config.json \
+    --alarm-actions arn:aws:sns:us-east-1:123456789012:Alerts
+```
+
+**anomaly-detection-config.json:**
+```json
+[
+  {
+    "Id": "m1",
+    "ReturnData": true,
+    "MetricStat": {
+      "Metric": {
+        "Namespace": "AWS/Lambda",
+        "MetricName": "Invocations",
+        "Dimensions": [
+          {
+            "Name": "FunctionName",
+            "Value": "MyFunction"
+          }
+        ]
+      },
+      "Period": 300,
+      "Stat": "Sum"
+    }
+  },
+  {
+    "Id": "ad1",
+    "Expression": "ANOMALY_DETECTION_BAND(m1, 2)",
+    "Label": "Invocations (expected)"
+  }
+]
+```
+
+---
+
+## Best Practices Avancées
+
+### 1. Immutable Infrastructure
+
+**Principe:** Ne jamais modifier une instance en production, toujours déployer une nouvelle version.
+
+```hcl
+# Auto Scaling avec Launch Template versionné
+resource "aws_launch_template" "app" {
+  name_prefix   = "app-lt-"
+  image_id      = data.aws_ami.app_ami.id  # AMI depuis pipeline CI/CD
+  instance_type = "t3.medium"
+
+  # Chaque changement crée une nouvelle version
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+resource "aws_autoscaling_group" "app" {
+  desired_capacity = 3
+  max_size         = 10
+  min_size         = 2
+
+  launch_template {
+    id      = aws_launch_template.app.id
+    version = "$Latest"  # Utilise toujours la dernière version
+  }
+
+  # Rolling update: remplace progressivement les instances
+  instance_refresh {
+    strategy = "Rolling"
+    preferences {
+      min_healthy_percentage = 90
+      instance_warmup        = 300
+    }
+  }
+}
+```
+
+**Pipeline CI/CD pour AMI:**
+```bash
+#!/bin/bash
+# build-ami.sh
+
+# 1. Build application
+docker build -t myapp:${GIT_COMMIT} .
+
+# 2. Run security scan
+trivy image myapp:${GIT_COMMIT} --severity CRITICAL,HIGH --exit-code 1
+
+# 3. Créer AMI avec Packer
+packer build \
+    -var "app_version=${GIT_COMMIT}" \
+    -var "base_ami=$(aws ec2 describe-images --owners amazon --filters "Name=name,Values=amzn2-ami-hvm-*" --query 'Images[0].ImageId' --output text)" \
+    packer-template.json
+
+# 4. Mettre à jour Launch Template
+NEW_AMI_ID=$(aws ec2 describe-images --filters "Name=tag:Version,Values=${GIT_COMMIT}" --query 'Images[0].ImageId' --output text)
+
+aws ec2 create-launch-template-version \
+    --launch-template-id lt-xxxxx \
+    --source-version '$Latest' \
+    --launch-template-data "{\"ImageId\":\"${NEW_AMI_ID}\"}"
+
+# 5. Déclench
+
+er instance refresh
+aws autoscaling start-instance-refresh \
+    --auto-scaling-group-name production-asg \
+    --preferences MinHealthyPercentage=90,InstanceWarmup=300
+```
+
+### 2. Blue/Green Deployments avec CodeDeploy
+
+```yaml
+# appspec.yml pour CodeDeploy
+version: 0.0
+Resources:
+  - TargetService:
+      Type: AWS::ECS::Service
+      Properties:
+        TaskDefinition: "arn:aws:ecs:us-east-1:123456789012:task-definition/my-task:5"
+        LoadBalancerInfo:
+          ContainerName: "app"
+          ContainerPort: 8080
+        PlatformVersion: "LATEST"
+
+Hooks:
+  - BeforeInstall: "LambdaFunctionToValidateBeforeInstall"
+  - AfterInstall: "LambdaFunctionToValidateAfterInstall"
+  - AfterAllowTestTraffic: "LambdaFunctionToValidateAfterTestTrafficStarts"
+  - BeforeAllowTraffic: "LambdaFunctionToValidateBeforeAllowingProductionTraffic"
+  - AfterAllowTraffic: "LambdaFunctionToValidateAfterAllowingProductionTraffic"
+```
+
+---
+
 ## Checklist de Sécurité Hébergement
 
 ### ✅ EC2 (Priorité Critique)
