@@ -1471,5 +1471,825 @@ def delete_user_data(user_id):
 
 ---
 
+## Mesures de Sécurité Additionnelles Critiques
+
+### 1. Sécurité des Données au Repos et en Transit
+
+#### Chiffrement Systématique
+
+**Au Repos (Encryption at Rest):**
+```bash
+# Activer le chiffrement par défaut pour tous les services
+# S3 - Chiffrement par défaut (SSE-KMS)
+aws s3api put-bucket-encryption --bucket my-bucket \
+    --server-side-encryption-configuration '{
+      "Rules": [{
+        "ApplyServerSideEncryptionByDefault": {
+          "SSEAlgorithm": "aws:kms",
+          "KMSMasterKeyID": "arn:aws:kms:region:account:key/key-id"
+        },
+        "BucketKeyEnabled": true
+      }]
+    }'
+
+# EBS - Chiffrement par défaut au niveau du compte
+aws ec2 enable-ebs-encryption-by-default --region us-east-1
+
+# RDS - Force le chiffrement dans les snapshots
+aws rds modify-db-instance --db-instance-identifier prod-db \
+    --storage-encrypted --kms-key-id arn:aws:kms:region:account:key/key-id
+```
+
+**En Transit (Encryption in Transit):**
+- ✅ TLS 1.3 minimum pour toutes les APIs
+- ✅ HTTPS obligatoire (politique S3 deny non-HTTPS)
+- ✅ VPN ou AWS PrivateLink pour connexions hybrides
+- ✅ Certificats ACM avec rotation automatique
+
+#### Gestion des Clés KMS
+
+```hcl
+# Terraform - KMS Key avec rotation automatique
+resource "aws_kms_key" "application_data" {
+  description             = "KMS key for application data encryption"
+  deletion_window_in_days = 30
+  enable_key_rotation     = true
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "Enable IAM User Permissions"
+        Effect = "Allow"
+        Principal = {
+          AWS = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:root"
+        }
+        Action   = "kms:*"
+        Resource = "*"
+      },
+      {
+        Sid    = "Allow services to use the key"
+        Effect = "Allow"
+        Principal = {
+          Service = [
+            "s3.amazonaws.com",
+            "rds.amazonaws.com",
+            "dynamodb.amazonaws.com",
+            "logs.amazonaws.com"
+          ]
+        }
+        Action = [
+          "kms:Decrypt",
+          "kms:GenerateDataKey",
+          "kms:CreateGrant"
+        ]
+        Resource = "*"
+      }
+    ]
+  })
+
+  tags = {
+    Name        = "application-data-key"
+    Environment = "production"
+    Compliance  = "required"
+  }
+}
+
+resource "aws_kms_alias" "application_data" {
+  name          = "alias/application-data"
+  target_key_id = aws_kms_key.application_data.key_id
+}
+```
+
+### 2. Sécurité des Secrets et Credentials
+
+#### AWS Secrets Manager - Stratégie Complète
+
+```python
+# Lambda pour rotation automatique des secrets
+import boto3
+import json
+import psycopg2
+from datetime import datetime
+
+secrets_client = boto3.client('secretsmanager')
+
+def lambda_handler(event, context):
+    """Rotation automatique des credentials de base de données"""
+
+    arn = event['SecretId']
+    token = event['ClientRequestToken']
+    step = event['Step']
+
+    # Récupérer le secret actuel
+    current_secret = secrets_client.get_secret_value(SecretId=arn)
+    current_dict = json.loads(current_secret['SecretString'])
+
+    if step == "createSecret":
+        # Générer un nouveau mot de passe
+        new_password = generate_secure_password()
+
+        # Stocker la nouvelle version
+        current_dict['password'] = new_password
+        secrets_client.put_secret_value(
+            SecretId=arn,
+            ClientRequestToken=token,
+            SecretString=json.dumps(current_dict),
+            VersionStages=['AWSPENDING']
+        )
+
+    elif step == "setSecret":
+        # Mettre à jour le mot de passe dans la base de données
+        pending_secret = secrets_client.get_secret_value(
+            SecretId=arn,
+            VersionId=token,
+            VersionStage='AWSPENDING'
+        )
+        pending_dict = json.loads(pending_secret['SecretString'])
+
+        # Connexion avec l'ancien mot de passe
+        conn = psycopg2.connect(
+            host=current_dict['host'],
+            user=current_dict['username'],
+            password=current_dict['password']
+        )
+
+        # Modifier le mot de passe
+        cursor = conn.cursor()
+        cursor.execute(
+            f"ALTER USER {current_dict['username']} PASSWORD %s",
+            (pending_dict['password'],)
+        )
+        conn.commit()
+        conn.close()
+
+    elif step == "testSecret":
+        # Tester la nouvelle connexion
+        pending_secret = secrets_client.get_secret_value(
+            SecretId=arn,
+            VersionId=token,
+            VersionStage='AWSPENDING'
+        )
+        pending_dict = json.loads(pending_secret['SecretString'])
+
+        # Tester la connexion
+        conn = psycopg2.connect(
+            host=pending_dict['host'],
+            user=pending_dict['username'],
+            password=pending_dict['password']
+        )
+        conn.close()
+
+    elif step == "finishSecret":
+        # Promouvoir AWSPENDING à AWSCURRENT
+        secrets_client.update_secret_version_stage(
+            SecretId=arn,
+            VersionStage='AWSCURRENT',
+            MoveToVersionId=token,
+            RemoveFromVersionId=current_secret['VersionId']
+        )
+
+    return {
+        'statusCode': 200,
+        'body': json.dumps(f'Rotation step {step} completed')
+    }
+
+def generate_secure_password(length=32):
+    """Générer un mot de passe sécurisé"""
+    import secrets
+    import string
+
+    alphabet = string.ascii_letters + string.digits + "!@#$%^&*"
+    password = ''.join(secrets.choice(alphabet) for _ in range(length))
+    return password
+```
+
+#### Parameter Store avec Chiffrement
+
+```bash
+# Stocker des paramètres chiffrés
+aws ssm put-parameter \
+    --name "/prod/database/connection_string" \
+    --value "postgresql://user:pass@host:5432/db" \
+    --type "SecureString" \
+    --key-id "alias/application-data" \
+    --description "Production database connection string" \
+    --tags Key=Environment,Value=production Key=Compliance,Value=required
+
+# Politique IAM restrictive pour accès aux paramètres
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "ssm:GetParameter",
+        "ssm:GetParameters"
+      ],
+      "Resource": "arn:aws:ssm:*:*:parameter/prod/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:PrincipalTag/Environment": "production"
+        }
+      }
+    },
+    {
+      "Effect": "Allow",
+      "Action": "kms:Decrypt",
+      "Resource": "arn:aws:kms:*:*:key/*",
+      "Condition": {
+        "StringEquals": {
+          "kms:ViaService": "ssm.us-east-1.amazonaws.com"
+        }
+      }
+    }
+  ]
+}
+```
+
+### 3. Sécurité des Conteneurs et Images
+
+#### Scan Automatique d'Images ECR
+
+```hcl
+# Terraform - ECR avec Enhanced Scanning
+resource "aws_ecr_repository" "application" {
+  name                 = "application-service"
+  image_tag_mutability = "IMMUTABLE"
+
+  image_scanning_configuration {
+    scan_on_push = true
+  }
+
+  encryption_configuration {
+    encryption_type = "KMS"
+    kms_key         = aws_kms_key.ecr.arn
+  }
+
+  tags = {
+    Name        = "application-service"
+    Environment = "production"
+  }
+}
+
+# EventBridge rule pour alerter sur vulnérabilités critiques
+resource "aws_cloudwatch_event_rule" "ecr_scan_findings" {
+  name        = "ecr-critical-vulnerabilities"
+  description = "Alert on critical vulnerabilities in ECR scans"
+
+  event_pattern = jsonencode({
+    source      = ["aws.inspector2"]
+    detail-type = ["Inspector2 Finding"]
+    detail = {
+      severity = ["CRITICAL", "HIGH"]
+      resourceType = ["ECR_REPOSITORY"]
+    }
+  })
+}
+
+resource "aws_cloudwatch_event_target" "sns" {
+  rule      = aws_cloudwatch_event_rule.ecr_scan_findings.name
+  target_id = "SendToSNS"
+  arn       = aws_sns_topic.security_alerts.arn
+}
+```
+
+#### Politique de Sécurité pour Images
+
+```yaml
+# OPA Policy pour Kubernetes - Autoriser uniquement images signées et scannées
+package kubernetes.admission
+
+deny[msg] {
+    input.request.kind.kind == "Pod"
+    image := input.request.object.spec.containers[_].image
+    not image_from_approved_registry(image)
+    msg := sprintf("Image %v is not from approved registry", [image])
+}
+
+deny[msg] {
+    input.request.kind.kind == "Pod"
+    image := input.request.object.spec.containers[_].image
+    not image_recently_scanned(image)
+    msg := sprintf("Image %v has not been scanned in the last 7 days", [image])
+}
+
+deny[msg] {
+    input.request.kind.kind == "Pod"
+    image := input.request.object.spec.containers[_].image
+    has_critical_vulnerabilities(image)
+    msg := sprintf("Image %v has critical vulnerabilities", [image])
+}
+
+image_from_approved_registry(image) {
+    startswith(image, "123456789012.dkr.ecr.us-east-1.amazonaws.com/")
+}
+```
+
+### 4. Sécurité des APIs et Applications Web
+
+#### Rate Limiting et DDoS Protection
+
+```hcl
+# AWS WAF avec rate limiting avancé
+resource "aws_wafv2_web_acl" "api_protection" {
+  name  = "api-advanced-protection"
+  scope = "REGIONAL"
+
+  default_action {
+    allow {}
+  }
+
+  # Rule 1: Rate limiting global
+  rule {
+    name     = "GlobalRateLimit"
+    priority = 1
+
+    action {
+      block {
+        custom_response {
+          response_code = 429
+          custom_response_body_key = "rate_limit_exceeded"
+        }
+      }
+    }
+
+    statement {
+      rate_based_statement {
+        limit              = 10000
+        aggregate_key_type = "IP"
+      }
+    }
+
+    visibility_config {
+      cloudwatch_metrics_enabled = true
+      metric_name                = "GlobalRateLimit"
+      sampled_requests_enabled   = true
+    }
+  }
+
+  # Rule 2: Rate limiting par endpoint
+  rule {
+    name     = "LoginEndpointRateLimit"
+    priority = 2
+
+    action {
+      block {
+        custom_response {
+          response_code = 429
+        }
+      }
+    }
+
+    statement {
+      rate_based_statement {
+        limit              = 100
+        aggregate_key_type = "IP"
+
+        scope_down_statement {
+          byte_match_statement {
+            search_string = "/api/auth/login"
+            field_to_match {
+              uri_path {}
+            }
+            text_transformation {
+              priority = 0
+              type     = "LOWERCASE"
+            }
+            positional_constraint = "EXACTLY"
+          }
+        }
+      }
+    }
+
+    visibility_config {
+      cloudwatch_metrics_enabled = true
+      metric_name                = "LoginRateLimit"
+      sampled_requests_enabled   = true
+    }
+  }
+
+  # Rule 3: Bot Control
+  rule {
+    name     = "BotControl"
+    priority = 3
+
+    override_action {
+      none {}
+    }
+
+    statement {
+      managed_rule_group_statement {
+        vendor_name = "AWS"
+        name        = "AWSManagedRulesBotControlRuleSet"
+
+        managed_rule_group_configs {
+          aws_managed_rules_bot_control_rule_set {
+            inspection_level = "TARGETED"
+          }
+        }
+      }
+    }
+
+    visibility_config {
+      cloudwatch_metrics_enabled = true
+      metric_name                = "BotControl"
+      sampled_requests_enabled   = true
+    }
+  }
+
+  # Rule 4: OWASP Top 10
+  rule {
+    name     = "OWASPTop10"
+    priority = 4
+
+    override_action {
+      none {}
+    }
+
+    statement {
+      managed_rule_group_statement {
+        vendor_name = "AWS"
+        name        = "AWSManagedRulesKnownBadInputsRuleSet"
+      }
+    }
+
+    visibility_config {
+      cloudwatch_metrics_enabled = true
+      metric_name                = "OWASPTop10"
+      sampled_requests_enabled   = true
+    }
+  }
+
+  custom_response_body {
+    key          = "rate_limit_exceeded"
+    content_type = "APPLICATION_JSON"
+    content      = jsonencode({
+      error = "Rate limit exceeded"
+      message = "Too many requests. Please try again later."
+      retry_after = 60
+    })
+  }
+
+  visibility_config {
+    cloudwatch_metrics_enabled = true
+    metric_name                = "APIProtection"
+    sampled_requests_enabled   = true
+  }
+}
+
+# Shield Advanced pour protection DDoS
+resource "aws_shield_protection" "api_gateway" {
+  name         = "api-gateway-protection"
+  resource_arn = aws_apigatewayv2_api.main.arn
+}
+```
+
+#### Content Security Policy et Headers de Sécurité
+
+```python
+# Lambda@Edge pour ajouter des headers de sécurité
+def lambda_handler(event, context):
+    """Ajouter des headers de sécurité aux réponses CloudFront"""
+
+    response = event['Records'][0]['cf']['response']
+    headers = response['headers']
+
+    # Content Security Policy
+    headers['content-security-policy'] = [{
+        'key': 'Content-Security-Policy',
+        'value': "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.example.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' https://fonts.gstatic.com; connect-src 'self' https://api.example.com; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+    }]
+
+    # Strict Transport Security
+    headers['strict-transport-security'] = [{
+        'key': 'Strict-Transport-Security',
+        'value': 'max-age=63072000; includeSubDomains; preload'
+    }]
+
+    # X-Content-Type-Options
+    headers['x-content-type-options'] = [{
+        'key': 'X-Content-Type-Options',
+        'value': 'nosniff'
+    }]
+
+    # X-Frame-Options
+    headers['x-frame-options'] = [{
+        'key': 'X-Frame-Options',
+        'value': 'DENY'
+    }]
+
+    # X-XSS-Protection
+    headers['x-xss-protection'] = [{
+        'key': 'X-XSS-Protection',
+        'value': '1; mode=block'
+    }]
+
+    # Referrer Policy
+    headers['referrer-policy'] = [{
+        'key': 'Referrer-Policy',
+        'value': 'strict-origin-when-cross-origin'
+    }]
+
+    # Permissions Policy
+    headers['permissions-policy'] = [{
+        'key': 'Permissions-Policy',
+        'value': 'geolocation=(), microphone=(), camera=()'
+    }]
+
+    return response
+```
+
+### 5. Backup et Disaster Recovery
+
+#### Stratégie de Backup Automatisée
+
+```hcl
+# AWS Backup - Plan de sauvegarde centralisé
+resource "aws_backup_plan" "production" {
+  name = "production-backup-plan"
+
+  rule {
+    rule_name         = "daily_backups"
+    target_vault_name = aws_backup_vault.production.name
+    schedule          = "cron(0 2 * * ? *)"  # 2 AM daily
+
+    lifecycle {
+      delete_after = 35  # Rétention 35 jours
+      cold_storage_after = 7  # Archive après 7 jours
+    }
+
+    recovery_point_tags = {
+      BackupType = "automated"
+      Frequency  = "daily"
+    }
+
+    copy_action {
+      destination_vault_arn = aws_backup_vault.disaster_recovery.arn
+
+      lifecycle {
+        delete_after = 90
+        cold_storage_after = 30
+      }
+    }
+  }
+
+  rule {
+    rule_name         = "weekly_backups"
+    target_vault_name = aws_backup_vault.production.name
+    schedule          = "cron(0 3 ? * 1 *)"  # 3 AM every Sunday
+
+    lifecycle {
+      delete_after = 365  # Rétention 1 an
+      cold_storage_after = 30
+    }
+
+    recovery_point_tags = {
+      BackupType = "automated"
+      Frequency  = "weekly"
+    }
+  }
+
+  advanced_backup_setting {
+    backup_options = {
+      WindowsVSS = "enabled"
+    }
+    resource_type = "EC2"
+  }
+}
+
+# Backup Vault avec chiffrement
+resource "aws_backup_vault" "production" {
+  name        = "production-backup-vault"
+  kms_key_arn = aws_kms_key.backup.arn
+
+  tags = {
+    Name        = "Production Backup Vault"
+    Environment = "production"
+  }
+}
+
+# Disaster Recovery Vault (autre région)
+resource "aws_backup_vault" "disaster_recovery" {
+  provider    = aws.dr_region
+  name        = "dr-backup-vault"
+  kms_key_arn = aws_kms_key.backup_dr.arn
+
+  tags = {
+    Name        = "DR Backup Vault"
+    Environment = "disaster-recovery"
+  }
+}
+
+# Sélection des ressources à sauvegarder
+resource "aws_backup_selection" "production_resources" {
+  name         = "production-resources"
+  plan_id      = aws_backup_plan.production.id
+  iam_role_arn = aws_iam_role.backup.arn
+
+  resources = [
+    "*"  # Toutes les ressources taggées
+  ]
+
+  selection_tag {
+    type  = "STRINGEQUALS"
+    key   = "Backup"
+    value = "required"
+  }
+
+  selection_tag {
+    type  = "STRINGEQUALS"
+    key   = "Environment"
+    value = "production"
+  }
+}
+```
+
+#### Tests de Restauration Automatisés
+
+```python
+# Lambda pour tester automatiquement les restaurations
+import boto3
+from datetime import datetime, timedelta
+
+backup_client = boto3.client('backup')
+ec2_client = boto3.client('ec2')
+rds_client = boto3.client('rds')
+
+def lambda_handler(event, context):
+    """Tester la restauration des backups hebdomadairement"""
+
+    # Récupérer le dernier backup
+    recovery_points = backup_client.list_recovery_points_by_backup_vault(
+        BackupVaultName='production-backup-vault'
+    )
+
+    for rp in recovery_points['RecoveryPoints']:
+        resource_type = rp['ResourceType']
+        recovery_point_arn = rp['RecoveryPointArn']
+
+        if resource_type == 'RDS':
+            test_rds_restore(recovery_point_arn)
+        elif resource_type == 'EC2':
+            test_ec2_restore(recovery_point_arn)
+
+    return {
+        'statusCode': 200,
+        'body': 'Backup restore tests completed'
+    }
+
+def test_rds_restore(recovery_point_arn):
+    """Tester la restauration RDS"""
+
+    # Restaurer dans un environnement de test
+    restore_job = backup_client.start_restore_job(
+        RecoveryPointArn=recovery_point_arn,
+        Metadata={
+            'DBInstanceIdentifier': f'restore-test-{datetime.now().strftime("%Y%m%d-%H%M%S")}',
+            'DBInstanceClass': 'db.t3.small',
+            'PubliclyAccessible': 'false'
+        },
+        IamRoleArn='arn:aws:iam::123456789012:role/AWSBackupServiceRole'
+    )
+
+    # Attendre la restauration et vérifier
+    # Puis supprimer l'instance de test
+
+    return restore_job['RestoreJobId']
+```
+
+### 6. Conformité et Audit Continu
+
+#### AWS Config Rules Personnalisées
+
+```python
+# Lambda pour Config Rule - Vérifier chiffrement obligatoire
+import boto3
+import json
+
+config_client = boto3.client('config')
+
+def lambda_handler(event, context):
+    """Config Rule: Vérifier que toutes les ressources sont chiffrées"""
+
+    invoking_event = json.loads(event['invokingEvent'])
+    configuration_item = invoking_event['configurationItem']
+
+    compliance_type = 'NON_COMPLIANT'
+    annotation = 'Resource is not encrypted'
+
+    resource_type = configuration_item['resourceType']
+
+    # Vérifier le chiffrement selon le type de ressource
+    if resource_type == 'AWS::S3::Bucket':
+        if is_s3_encrypted(configuration_item):
+            compliance_type = 'COMPLIANT'
+            annotation = 'S3 bucket is encrypted'
+
+    elif resource_type == 'AWS::RDS::DBInstance':
+        if is_rds_encrypted(configuration_item):
+            compliance_type = 'COMPLIANT'
+            annotation = 'RDS instance is encrypted'
+
+    elif resource_type == 'AWS::EC2::Volume':
+        if is_ebs_encrypted(configuration_item):
+            compliance_type = 'COMPLIANT'
+            annotation = 'EBS volume is encrypted'
+
+    # Enregistrer l'évaluation
+    config_client.put_evaluations(
+        Evaluations=[{
+            'ComplianceResourceType': resource_type,
+            'ComplianceResourceId': configuration_item['resourceId'],
+            'ComplianceType': compliance_type,
+            'Annotation': annotation,
+            'OrderingTimestamp': configuration_item['configurationItemCaptureTime']
+        }],
+        ResultToken=event['resultToken']
+    )
+
+def is_s3_encrypted(config_item):
+    """Vérifier si le bucket S3 est chiffré"""
+    config = config_item.get('configuration', {})
+    encryption = config.get('serverSideEncryptionConfiguration')
+    return encryption is not None
+
+def is_rds_encrypted(config_item):
+    """Vérifier si l'instance RDS est chiffrée"""
+    config = config_item.get('configuration', {})
+    return config.get('storageEncrypted', False)
+
+def is_ebs_encrypted(config_item):
+    """Vérifier si le volume EBS est chiffré"""
+    config = config_item.get('configuration', {})
+    return config.get('encrypted', False)
+```
+
+#### Terraform - Config Rules Deployment
+
+```hcl
+# AWS Config Rules pour conformité
+resource "aws_config_config_rule" "encryption_mandatory" {
+  name = "encryption-mandatory"
+
+  source {
+    owner             = "CUSTOM_LAMBDA"
+    source_identifier = aws_lambda_function.encryption_check.arn
+
+    source_detail {
+      event_source = "aws.config"
+      message_type = "ConfigurationItemChangeNotification"
+    }
+
+    source_detail {
+      event_source = "aws.config"
+      message_type = "OversizedConfigurationItemChangeNotification"
+    }
+  }
+
+  scope {
+    compliance_resource_types = [
+      "AWS::S3::Bucket",
+      "AWS::RDS::DBInstance",
+      "AWS::EC2::Volume",
+      "AWS::DynamoDB::Table"
+    ]
+  }
+
+  depends_on = [aws_config_configuration_recorder.main]
+}
+
+# Remediation automatique pour les ressources non conformes
+resource "aws_config_remediation_configuration" "encrypt_s3" {
+  config_rule_name = aws_config_config_rule.encryption_mandatory.name
+
+  target_type      = "SSM_DOCUMENT"
+  target_id        = "AWS-EnableS3BucketEncryption"
+  target_version   = "1"
+  resource_type    = "AWS::S3::Bucket"
+
+  parameter {
+    name         = "AutomationAssumeRole"
+    static_value = aws_iam_role.config_remediation.arn
+  }
+
+  parameter {
+    name           = "BucketName"
+    resource_value = "RESOURCE_ID"
+  }
+
+  parameter {
+    name         = "SSEAlgorithm"
+    static_value = "aws:kms"
+  }
+
+  automatic                  = true
+  maximum_automatic_attempts = 5
+  retry_attempt_seconds      = 60
+}
+```
+
+---
+
 © 2025 - Guide de Sécurisation AWS pour Applications SaaS
 Tous droits réservés - Confidentiel Client
