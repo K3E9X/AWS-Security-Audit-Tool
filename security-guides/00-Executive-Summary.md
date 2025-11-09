@@ -2291,5 +2291,963 @@ resource "aws_config_remediation_configuration" "encrypt_s3" {
 
 ---
 
+## Architecture Zero Trust
+
+### Principes Fondamentaux
+
+**"Never Trust, Always Verify"** - L'approche Zero Trust élimine la notion de périmètre de confiance.
+
+```
+Traditional Perimeter Security:
+┌─────────────────────────────────────┐
+│     TRUSTED ZONE                    │
+│  [ALL TRAFFIC ALLOWED]              │
+│                                     │
+│  ┌─────┐  ┌─────┐  ┌─────┐        │
+│  │ APP │  │ DB  │  │ API │        │
+│  └─────┘  └─────┘  └─────┘        │
+└─────────────────────────────────────┘
+         ↑
+    FIREWALL (Perimeter)
+
+Zero Trust Architecture:
+┌─────────────────────────────────────┐
+│  ┌─────┐      ┌─────┐      ┌─────┐│
+│  │ APP │◄────►│ DB  │◄────►│ API ││
+│  └─────┘      └─────┘      └─────┘│
+│     ▲            ▲            ▲    │
+│     │            │            │    │
+│  ┌──┴────────────┴────────────┴──┐ │
+│  │  Identity & Policy Engine    │ │
+│  │  - Verify Every Request      │ │
+│  │  - Least Privilege           │ │
+│  │  - Continuous Authentication │ │
+│  └──────────────────────────────┘ │
+└─────────────────────────────────────┘
+```
+
+### Implémentation AWS Zero Trust
+
+```hcl
+# Terraform - Zero Trust avec AWS Verified Access
+resource "aws_verifiedaccess_instance" "main" {
+  description = "Zero Trust access for corporate applications"
+
+  tags = {
+    Name = "zero-trust-instance"
+  }
+}
+
+resource "aws_verifiedaccess_group" "app_group" {
+  verifiedaccess_instance_id = aws_verifiedaccess_instance.main.id
+  description                = "Application access group"
+
+  policy_document = jsonencode({
+    Version = "1.0"
+    Statement = [{
+      Effect = "Allow"
+      Principal = {
+        User = "*"
+      }
+      Action = "verifiedaccess:Connect"
+      Resource = "*"
+      Condition = {
+        StringEquals = {
+          "verifiedaccess:DevicePosture" = "Compliant"
+        }
+        IpAddress = {
+          "aws:SourceIp" = var.allowed_ip_ranges
+        }
+        Bool = {
+          "verifiedaccess:MfaAuthenticated" = "true"
+        }
+      }
+    }]
+  })
+}
+
+# PrivateLink pour accès Zero Trust aux services
+resource "aws_vpc_endpoint" "s3_zero_trust" {
+  vpc_id            = aws_vpc.main.id
+  service_name      = "com.amazonaws.us-east-1.s3"
+  vpc_endpoint_type = "Gateway"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Principal = {
+        AWS = aws_iam_role.application.arn
+      }
+      Action = [
+        "s3:GetObject",
+        "s3:PutObject"
+      ]
+      Resource = "${aws_s3_bucket.data.arn}/*"
+      Condition = {
+        StringEquals = {
+          "aws:PrincipalOrgID" = data.aws_organizations_organization.current.id
+        }
+        IpAddress = {
+          "aws:SourceIp" = var.vpc_cidr
+        }
+      }
+    }]
+  })
+
+  route_table_ids = [aws_route_table.private.id]
+}
+```
+
+### Identity-Centric Security
+
+```python
+# Lambda Authorizer avec contexte riche pour décisions Zero Trust
+import boto3
+import json
+from datetime import datetime
+
+def lambda_handler(event, context):
+    """Authorizer Zero Trust avec contexte de sécurité enrichi"""
+
+    token = event['authorizationToken']
+
+    # 1. Vérifier l'identité
+    identity = verify_identity(token)
+
+    # 2. Vérifier le device posture
+    device_compliant = check_device_posture(identity['device_id'])
+
+    # 3. Vérifier le contexte (IP, temps, risque)
+    context = {
+        'source_ip': event['requestContext']['identity']['sourceIp'],
+        'time': datetime.now().hour,
+        'user_agent': event['requestContext']['identity']['userAgent'],
+        'mfa_verified': identity.get('mfa_verified', False),
+        'device_compliant': device_compliant,
+        'risk_score': calculate_risk_score(identity, event)
+    }
+
+    # 4. Décision basée sur le contexte complet
+    if not context['mfa_verified']:
+        return deny_policy('MFA required')
+
+    if not context['device_compliant']:
+        return deny_policy('Non-compliant device')
+
+    if context['risk_score'] > 70:
+        return deny_policy('High risk score')
+
+    # 5. Accès limité selon le contexte
+    if context['time'] < 6 or context['time'] > 22:
+        # Accès hors heures - permissions réduites
+        return allow_policy_limited(identity, event['methodArn'])
+
+    # Accès normal avec contexte pour audit
+    policy = allow_policy_full(identity, event['methodArn'])
+    policy['context'] = {
+        'userId': identity['user_id'],
+        'deviceId': identity['device_id'],
+        'riskScore': str(context['risk_score']),
+        'mfaVerified': 'true',
+        'timestamp': datetime.now().isoformat()
+    }
+
+    return policy
+```
+
+---
+
+## Mesures Organisationnelles et Humaines
+
+### 1. Security Champions Program
+
+**Objectif:** Former des ambassadeurs sécurité dans chaque équipe.
+
+```yaml
+# Programme Security Champions
+structure:
+  selection:
+    - Volontaires motivés par la sécurité
+    - Un champion par équipe de 8-10 personnes
+    - Engagement: 10-20% du temps
+
+  formation:
+    - AWS Security Fundamentals (16h)
+    - Secure Coding Practices (8h)
+    - Threat Modeling (4h)
+    - Incident Response (4h)
+    - Monthly security updates (2h/mois)
+
+  responsabilités:
+    - Code reviews orientés sécurité
+    - Sensibilisation de l'équipe
+    - Point de contact pour questions sécurité
+    - Participation aux threat modeling sessions
+    - Feedback sur les politiques de sécurité
+
+  reconnaissance:
+    - Certification AWS Security Specialty sponsorisée
+    - Badge "Security Champion" visible
+    - Participation aux décisions d'architecture
+    - Évolution de carrière favorisée
+```
+
+### 2. Security Awareness Training
+
+**Programme de sensibilisation obligatoire:**
+
+| Formation | Fréquence | Durée | Obligatoire |
+|-----------|-----------|-------|-------------|
+| **Onboarding Security** | À l'embauche | 4h | ✅ Tous |
+| **Phishing Simulation** | Mensuel | 10min | ✅ Tous |
+| **AWS Security Basics** | Annuel | 2h | ✅ Tous tech |
+| **Secure Coding** | Annuel | 8h | ✅ Développeurs |
+| **Data Classification** | Annuel | 1h | ✅ Tous |
+| **Incident Response** | Semestriel | 2h | ✅ On-call |
+| **Cloud Security Deep Dive** | Annuel | 16h | ✅ Architectes |
+
+**KPIs de sensibilisation:**
+```python
+# Métriques de sécurité humaine
+security_awareness_kpis = {
+    'phishing_click_rate': {
+        'target': '< 5%',
+        'current': '8%',
+        'trend': 'improving'  # -3% vs last quarter
+    },
+    'security_training_completion': {
+        'target': '> 95%',
+        'current': '98%',
+        'on_time': '92%'
+    },
+    'security_incidents_from_human_error': {
+        'target': '< 10% of total',
+        'current': '12%',
+        'trend': 'stable'
+    },
+    'time_to_report_suspicious_activity': {
+        'target': '< 30 minutes',
+        'current': '45 minutes',
+        'p95': '2 hours'
+    }
+}
+```
+
+### 3. Secure Software Development Lifecycle (SSDLC)
+
+```mermaid
+graph LR
+    A[Requirements] -->|Threat Modeling| B[Design]
+    B -->|Security Architecture Review| C[Development]
+    C -->|SAST/SCA| D[Testing]
+    D -->|DAST/Penetration Test| E[Deployment]
+    E -->|RASP/WAF| F[Operations]
+    F -->|Monitoring/Response| A
+
+    style A fill:#e1f5ff
+    style B fill:#e1f5ff
+    style C fill:#ffe1e1
+    style D fill:#ffe1e1
+    style E fill:#e1ffe1
+    style F fill:#e1ffe1
+```
+
+**Gates de sécurité obligatoires:**
+
+```yaml
+# .github/workflows/security-gates.yml
+name: Security Gates
+
+on: [pull_request]
+
+jobs:
+  security-scan:
+    runs-on: ubuntu-latest
+    steps:
+      # Gate 1: SAST (Static Application Security Testing)
+      - name: SAST Scan
+        run: |
+          semgrep --config=auto --severity=ERROR --strict
+          # Exit code != 0 = BLOCK merge
+
+      # Gate 2: SCA (Software Composition Analysis)
+      - name: Dependency Check
+        run: |
+          trivy fs --severity CRITICAL,HIGH --exit-code 1 .
+
+      # Gate 3: Secrets Scanning
+      - name: Secrets Detection
+        run: |
+          trufflehog filesystem . --fail
+
+      # Gate 4: IaC Security
+      - name: Terraform Security
+        run: |
+          tfsec . --minimum-severity CRITICAL
+
+      # Gate 5: Container Scanning (if applicable)
+      - name: Container Scan
+        if: contains(github.event.pull_request.files, 'Dockerfile')
+        run: |
+          docker build -t scan-target .
+          trivy image --severity CRITICAL --exit-code 1 scan-target
+
+      # Gate 6: License Compliance
+      - name: License Check
+        run: |
+          # Interdire licenses GPL, AGPL en production
+          licensee detect --confident --no-readme
+```
+
+---
+
+## Incident Response et Forensics
+
+### 1. Plan de Réponse aux Incidents (IRP)
+
+**Phases de réponse:**
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  1. PREPARATION                                         │
+│     - Runbooks documentés                               │
+│     - Équipe formée                                     │
+│     - Outils configurés                                 │
+└─────────────────┬───────────────────────────────────────┘
+                  │
+┌─────────────────▼───────────────────────────────────────┐
+│  2. DETECTION & ANALYSIS                                │
+│     - Alertes automatiques                              │
+│     - Triage et classification                          │
+│     - Severity assessment                               │
+└─────────────────┬───────────────────────────────────────┘
+                  │
+┌─────────────────▼───────────────────────────────────────┐
+│  3. CONTAINMENT                                         │
+│     - Isolation des systèmes                            │
+│     - Révocation credentials                            │
+│     - Snapshots forensics                               │
+└─────────────────┬───────────────────────────────────────┘
+                  │
+┌─────────────────▼───────────────────────────────────────┐
+│  4. ERADICATION                                         │
+│     - Suppression threat                                │
+│     - Patch vulnérabilités                              │
+│     - Validation clean state                            │
+└─────────────────┬───────────────────────────────────────┘
+                  │
+┌─────────────────▼───────────────────────────────────────┐
+│  5. RECOVERY                                            │
+│     - Restauration services                             │
+│     - Monitoring accru                                  │
+│     - Validation functionality                          │
+└─────────────────┬───────────────────────────────────────┘
+                  │
+┌─────────────────▼───────────────────────────────────────┐
+│  6. POST-INCIDENT                                       │
+│     - Incident report                                   │
+│     - Lessons learned                                   │
+│     - Process improvements                              │
+└─────────────────────────────────────────────────────────┘
+```
+
+### 2. AWS Forensics Automation
+
+```python
+# Lambda pour capture forensics automatique
+import boto3
+from datetime import datetime
+
+ec2 = boto3.client('ec2')
+s3 = boto3.client('s3')
+ssm = boto3.client('ssm')
+
+def lambda_handler(event, context):
+    """Capture forensics suite à une alerte GuardDuty"""
+
+    finding = event['detail']
+    resource = finding['resource']
+
+    if resource['resourceType'] == 'Instance':
+        instance_id = resource['instanceDetails']['instanceId']
+
+        # 1. Tag l'instance comme compromise
+        ec2.create_tags(
+            Resources=[instance_id],
+            Tags=[
+                {'Key': 'SecurityStatus', 'Value': 'Compromised'},
+                {'Key': 'IsolatedAt', 'Value': datetime.now().isoformat()},
+                {'Key': 'FindingId', 'Value': finding['id']}
+            ]
+        )
+
+        # 2. Créer un snapshot de tous les volumes pour forensics
+        volumes = ec2.describe_volumes(
+            Filters=[{'Name': 'attachment.instance-id', 'Values': [instance_id]}]
+        )['Volumes']
+
+        snapshot_ids = []
+        for volume in volumes:
+            snapshot = ec2.create_snapshot(
+                VolumeId=volume['VolumeId'],
+                Description=f"Forensic snapshot - Finding {finding['id']}",
+                TagSpecifications=[{
+                    'ResourceType': 'snapshot',
+                    'Tags': [
+                        {'Key': 'Purpose', 'Value': 'Forensics'},
+                        {'Key': 'InstanceId', 'Value': instance_id},
+                        {'Key': 'Severity', 'Value': str(finding['severity'])}
+                    ]
+                }]
+            )
+            snapshot_ids.append(snapshot['SnapshotId'])
+
+        # 3. Capturer la mémoire (si possible)
+        try:
+            memory_dump = ssm.send_command(
+                InstanceIds=[instance_id],
+                DocumentName='AWS-RunShellScript',
+                Parameters={
+                    'commands': [
+                        'sudo apt-get install -y volatility',
+                        f'sudo volatility -f /dev/mem imageinfo > /tmp/memory-{instance_id}.dump',
+                        f'aws s3 cp /tmp/memory-{instance_id}.dump s3://forensics-bucket/memory/'
+                    ]
+                }
+            )
+        except Exception as e:
+            print(f"Memory capture failed: {e}")
+
+        # 4. Capturer les logs
+        log_capture = ssm.send_command(
+            InstanceIds=[instance_id],
+            DocumentName='AWS-RunShellScript',
+            Parameters={
+                'commands': [
+                    f'sudo tar -czf /tmp/logs-{instance_id}.tar.gz /var/log/',
+                    f'aws s3 cp /tmp/logs-{instance_id}.tar.gz s3://forensics-bucket/logs/'
+                ]
+            }
+        )
+
+        # 5. Isoler l'instance (changer le security group)
+        ec2.modify_instance_attribute(
+            InstanceId=instance_id,
+            Groups=['sg-forensics-isolation']  # SG qui bloque tout
+        )
+
+        # 6. Notifier l'équipe de sécurité
+        sns = boto3.client('sns')
+        sns.publish(
+            TopicArn='arn:aws:sns:us-east-1:123456789012:SecurityIncidents',
+            Subject=f'INCIDENT: {finding["title"]}',
+            Message=f"""
+Incident Security Detected:
+- Finding ID: {finding['id']}
+- Severity: {finding['severity']}
+- Instance: {instance_id}
+- Snapshots: {', '.join(snapshot_ids)}
+
+Actions taken:
+✅ Instance tagged as compromised
+✅ Forensic snapshots created
+✅ Instance isolated
+✅ Logs captured
+
+Next steps:
+1. Review GuardDuty finding details
+2. Analyze forensic snapshots
+3. Determine if eradication needed
+            """
+        )
+
+        return {
+            'statusCode': 200,
+            'forensics': {
+                'snapshots': snapshot_ids,
+                'instance_isolated': True,
+                'logs_captured': True
+            }
+        }
+```
+
+### 3. Runbook Template
+
+```markdown
+# Incident Runbook: [TYPE D'INCIDENT]
+
+## Metadata
+- **Severity:** P0 / P1 / P2 / P3
+- **On-Call Team:** Security Team
+- **Expected Response Time:** 15 minutes (P0), 1 hour (P1)
+
+## 1. Detection Indicators
+- [ ] GuardDuty finding type: [SPECIFIC_TYPE]
+- [ ] CloudWatch alarm: [ALARM_NAME]
+- [ ] Manual report from: [SOURCE]
+
+## 2. Initial Assessment (5 minutes)
+```bash
+# Vérifier l'impact
+aws cloudtrail lookup-events \
+    --lookup-attributes AttributeKey=ResourceName,AttributeValue=[RESOURCE]
+
+# Vérifier les accès récents
+aws logs filter-log-events \
+    --log-group-name /aws/cloudtrail/logs \
+    --filter-pattern '{$.userIdentity.arn = "[SUSPECTED_ARN]"}'
+```
+
+## 3. Containment (15 minutes)
+- [ ] Isoler la ressource compromise
+- [ ] Révoquer credentials exposés
+- [ ] Créer snapshots forensics
+- [ ] Activer logging accru
+
+## 4. Communication
+- [ ] Notifier CISO
+- [ ] Créer incident ticket: [JIRA/ServiceNow]
+- [ ] Status update every 30 minutes
+
+## 5. Eradication Checklist
+- [ ] Identifier root cause
+- [ ] Supprimer backdoors
+- [ ] Patcher vulnérabilités
+- [ ] Rotation tous les secrets
+
+## 6. Recovery Validation
+- [ ] Services restored
+- [ ] No suspicious activity for 24h
+- [ ] Security scans clean
+
+## 7. Post-Incident
+- [ ] Incident report complété
+- [ ] Lessons learned meeting
+- [ ] Update runbooks
+- [ ] Amélioration des détections
+```
+
+---
+
+## Threat Intelligence et Threat Hunting
+
+### 1. Integration Threat Intelligence
+
+```python
+# Lambda pour enrichir les findings avec Threat Intelligence
+import boto3
+import requests
+
+def lambda_handler(event, context):
+    """Enrichir GuardDuty findings avec threat intelligence"""
+
+    finding = event['detail']
+
+    # Extraire les IOCs (Indicators of Compromise)
+    iocs = extract_iocs(finding)
+
+    # Enrichir avec VirusTotal
+    vt_data = {}
+    for ip in iocs.get('ips', []):
+        vt_data[ip] = check_virustotal_ip(ip)
+
+    # Enrichir avec AbuseIPDB
+    abuse_data = {}
+    for ip in iocs.get('ips', []):
+        abuse_data[ip] = check_abuseipdb(ip)
+
+    # Enrichir avec AWS Threat Intelligence
+    aws_ti = check_aws_threat_intel(iocs)
+
+    # Calculer un risk score enrichi
+    risk_score = calculate_enriched_risk_score(
+        finding,
+        vt_data,
+        abuse_data,
+        aws_ti
+    )
+
+    # Stocker dans DynamoDB pour hunting
+    store_enriched_finding(finding, {
+        'virustotal': vt_data,
+        'abuseipdb': abuse_data,
+        'aws_ti': aws_ti,
+        'risk_score': risk_score
+    })
+
+    # Si risk score > 80, escalader immédiatement
+    if risk_score > 80:
+        escalate_to_security_team(finding, risk_score)
+
+    return {'risk_score': risk_score}
+
+def check_virustotal_ip(ip):
+    """Check IP reputation sur VirusTotal"""
+    api_key = os.environ['VT_API_KEY']
+    url = f'https://www.virustotal.com/api/v3/ip_addresses/{ip}'
+
+    response = requests.get(url, headers={'x-apikey': api_key})
+
+    if response.status_code == 200:
+        data = response.json()
+        return {
+            'malicious': data['data']['attributes']['last_analysis_stats']['malicious'],
+            'reputation': data['data']['attributes'].get('reputation', 0)
+        }
+    return None
+```
+
+### 2. Proactive Threat Hunting
+
+```sql
+-- CloudWatch Logs Insights: Hunt pour activité suspecte
+
+-- Hunt 1: Découvrir des patterns d'exfiltration
+fields @timestamp, userIdentity.arn, eventName, requestParameters.bucketName,
+       additionalEventData.bytesTransferredOut
+| filter eventName = "GetObject"
+| stats sum(additionalEventData.bytesTransferredOut) as totalBytes,
+        count(*) as requests,
+        count_distinct(requestParameters.key) as uniqueFiles
+  by userIdentity.arn, bin(1h)
+| filter totalBytes > 10737418240  -- > 10GB
+| sort totalBytes desc
+
+-- Hunt 2: Détection de reconnaissance (enumeration)
+fields @timestamp, userIdentity.arn, eventName, errorCode
+| filter eventName like /(?i)(list|describe|get)/
+| filter errorCode in ["AccessDenied", "UnauthorizedOperation"]
+| stats count(*) as deniedRequests,
+        count_distinct(eventName) as uniqueAPIs
+  by userIdentity.arn, bin(5m)
+| filter deniedRequests > 50 and uniqueAPIs > 10
+| sort deniedRequests desc
+
+-- Hunt 3: Création de ressources inhabituelles
+fields @timestamp, userIdentity.arn, eventName, awsRegion
+| filter eventName like /^(Create|Run|Launch)/
+| filter awsRegion not in ["us-east-1", "eu-west-1"]  -- Régions non utilisées
+| stats count(*) as resourceCreations by userIdentity.arn, awsRegion
+| sort resourceCreations desc
+
+-- Hunt 4: Modification de configurations sécurité
+fields @timestamp, userIdentity.arn, eventName, requestParameters
+| filter eventName in [
+    "PutBucketPolicy", "DeleteBucketPolicy",
+    "ModifyDBInstance", "AuthorizeSecurityGroupIngress",
+    "PutBucketAcl", "PutBucketPublicAccessBlock"
+  ]
+| sort @timestamp desc
+
+-- Hunt 5: Accès avec credentials temporaires inhabituels
+fields @timestamp, userIdentity.arn, userIdentity.sessionContext.sessionIssuer.userName,
+       sourceIPAddress
+| filter userIdentity.type = "AssumedRole"
+| filter userIdentity.sessionContext.sessionIssuer.userName not like /^(jenkins|github-actions|terraform)/
+| stats count(*) as sessions,
+        count_distinct(sourceIPAddress) as uniqueIPs
+  by userIdentity.arn, bin(1h)
+| filter uniqueIPs > 5
+| sort sessions desc
+```
+
+---
+
+## Red Team / Purple Team Exercises
+
+### 1. Attack Simulation Framework
+
+```python
+# Stratus Red Team - Simulations d'attaques AWS
+# https://github.com/DataDog/stratus-red-team
+
+# Exemple de simulation d'attaques pour tester les défenses
+
+import subprocess
+import json
+
+attack_scenarios = {
+    'privilege_escalation': [
+        'aws.iam.attach-admin-policy-to-role',
+        'aws.iam.create-admin-user',
+        'aws.iam.backdoor-assume-role'
+    ],
+    'persistence': [
+        'aws.iam.create-access-key',
+        'aws.lambda.backdoor-function',
+        'aws.ec2.create-login-profile'
+    ],
+    'data_exfiltration': [
+        'aws.s3.exfiltrate-data',
+        'aws.rds.snapshot-export',
+        'aws.ec2.download-user-data'
+    ],
+    'defense_evasion': [
+        'aws.cloudtrail.stop-logging',
+        'aws.guardduty.disable-detector',
+        'aws.config.delete-recorder'
+    ]
+}
+
+def run_attack_simulation(scenario_category):
+    """Exécuter une simulation d'attaque"""
+
+    print(f"[*] Running {scenario_category} attack simulations")
+
+    results = []
+    for technique in attack_scenarios[scenario_category]:
+        print(f"  [+] Testing: {technique}")
+
+        # Warm up (préparer l'attaque)
+        subprocess.run(['stratus', 'warmup', technique])
+
+        # Détoner l'attaque
+        result = subprocess.run(
+            ['stratus', 'detonate', technique],
+            capture_output=True,
+            text=True
+        )
+
+        # Vérifier si détecté
+        detected = check_if_detected(technique)
+
+        results.append({
+            'technique': technique,
+            'executed': result.returncode == 0,
+            'detected': detected,
+            'time_to_detect': detected['time'] if detected else None
+        })
+
+        # Cleanup
+        subprocess.run(['stratus', 'cleanup', technique])
+
+    return results
+
+def check_if_detected(technique, timeout=300):
+    """Vérifier si l'attaque a été détectée par GuardDuty/Security Hub"""
+
+    import time
+    start_time = time.time()
+
+    guardduty = boto3.client('guardduty')
+    detector_id = guardduty.list_detectors()['DetectorIds'][0]
+
+    while time.time() - start_time < timeout:
+        findings = guardduty.list_findings(
+            DetectorId=detector_id,
+            FindingCriteria={
+                'Criterion': {
+                    'updatedAt': {
+                        'Gte': int((start_time - 60) * 1000)  # 1 min before
+                    }
+                }
+            }
+        )
+
+        if findings['FindingIds']:
+            detection_time = time.time() - start_time
+            return {
+                'detected': True,
+                'time': detection_time,
+                'finding_id': findings['FindingIds'][0]
+            }
+
+        time.sleep(10)
+
+    return False
+
+# Rapport de simulation
+def generate_red_team_report(results):
+    """Générer un rapport des simulations"""
+
+    total = len(results)
+    detected = sum(1 for r in results if r['detected'])
+    avg_detection_time = sum(r['time_to_detect'] for r in results if r['detected']) / detected if detected > 0 else 0
+
+    report = f"""
+# Red Team Simulation Report
+
+## Summary
+- Total Attacks Simulated: {total}
+- Attacks Detected: {detected} ({detected/total*100:.1f}%)
+- Average Detection Time: {avg_detection_time:.1f} seconds
+
+## Detection Gap Analysis
+"""
+
+    for result in results:
+        if not result['detected']:
+            report += f"\n⚠️ **UNDETECTED**: {result['technique']}"
+            report += f"\n   Recommendation: Create detection rule for this technique\n"
+
+    return report
+```
+
+### 2. Purple Team Collaboration
+
+```yaml
+# Purple Team Exercise Template
+
+exercise:
+  name: "Cloud Privilege Escalation Detection"
+  date: "2025-11-XX"
+  duration: "4 hours"
+
+  participants:
+    red_team:
+      - Security Engineer (Attacker)
+    blue_team:
+      - SOC Analyst
+      - Cloud Security Engineer
+    purple_team_lead:
+      - Security Architect
+
+  objectives:
+    - Test detection capabilities for IAM privilege escalation
+    - Improve MTTD (Mean Time To Detect)
+    - Document blind spots
+    - Create new detection rules
+
+  attack_scenarios:
+    scenario_1:
+      name: "IAM Policy Backdoor"
+      technique: "T1098.001" # MITRE ATT&CK
+      steps:
+        - Attacker creates new IAM user
+        - Attaches PowerUserAccess policy
+        - Creates access keys
+        - Attempts to escalate to Admin
+
+      blue_team_tasks:
+        - Monitor CloudTrail for suspicious IAM changes
+        - Detect unauthorized policy attachments
+        - Alert on access key creation for new users
+
+      success_criteria:
+        - Detection within 5 minutes
+        - Accurate alert with context
+        - Automated containment triggered
+
+    scenario_2:
+      name: "Lambda Backdoor Persistence"
+      technique: "T1525"
+      steps:
+        - Create Lambda function with admin role
+        - Function creates new IAM users
+        - Scheduled via EventBridge
+
+      blue_team_tasks:
+        - Detect Lambda with overly permissive role
+        - Monitor for Lambda-created IAM resources
+        - Block unauthorized EventBridge rules
+
+  post_exercise:
+    - Review all detections vs misses
+    - Update detection rules
+    - Improve runbooks
+    - Schedule next exercise (quarterly)
+```
+
+---
+
+## Supply Chain Security
+
+### 1. Software Bill of Materials (SBOM)
+
+```bash
+# Générer un SBOM pour chaque build
+syft packages dir:. -o cyclonedx-json > sbom.json
+
+# Scanner les vulnérabilités connues
+grype sbom:sbom.json --fail-on high
+
+# Signer le SBOM avec Cosign
+cosign sign-blob --key cosign.key sbom.json > sbom.json.sig
+
+# Vérifier l'intégrité
+cosign verify-blob --key cosign.pub --signature sbom.json.sig sbom.json
+```
+
+### 2. Dependency Confusion Protection
+
+```hcl
+# CodeArtifact pour gérer les dépendances internes
+resource "aws_codeartifact_domain" "main" {
+  domain = "company-packages"
+}
+
+resource "aws_codeartifact_repository" "internal" {
+  repository = "internal-packages"
+  domain     = aws_codeartifact_domain.main.domain
+
+  external_connections {
+    external_connection_name = "public:npmjs"
+  }
+}
+
+# Politique pour bloquer les packages non approuvés
+resource "aws_codeartifact_repository_permissions_policy" "internal" {
+  repository = aws_codeartifact_repository.internal.repository
+  domain     = aws_codeartifact_domain.main.domain
+
+  policy_document = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Principal = {
+        AWS = aws_iam_role.ci_cd.arn
+      }
+      Action = [
+        "codeartifact:PublishPackageVersion",
+        "codeartifact:PutPackageMetadata"
+      ]
+      Resource = "*"
+      Condition = {
+        StringEquals = {
+          "codeartifact:PackageOrigin" = "INTERNAL"
+        }
+      }
+    }]
+  })
+}
+```
+
+### 3. Container Image Signing
+
+```bash
+# Cosign pour signer les images Docker
+cosign generate-key-pair
+
+# Build et sign
+docker build -t myapp:v1.0 .
+cosign sign --key cosign.key myregistry/myapp:v1.0
+
+# Vérification dans ECS/EKS
+cosign verify --key cosign.pub myregistry/myapp:v1.0
+```
+
+```yaml
+# Admission Controller pour EKS - Uniquement images signées
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: image-signature-validation
+webhooks:
+  - name: check-image-signature.security.company.com
+    clientConfig:
+      service:
+        name: image-validator
+        namespace: security-system
+    rules:
+      - operations: ["CREATE", "UPDATE"]
+        apiGroups: [""]
+        apiVersions: ["v1"]
+        resources: ["pods"]
+    failurePolicy: Fail  # Bloquer si validation échoue
+```
+
+---
+
 © 2025 - Guide de Sécurisation AWS pour Applications SaaS
 Tous droits réservés - Confidentiel Client
