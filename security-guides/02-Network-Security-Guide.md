@@ -1960,6 +1960,1115 @@ output "private_db_subnet_ids" {
 
 ---
 
+## VPC Traffic Mirroring pour IDS/IPS
+
+### 1. Présentation VPC Traffic Mirroring
+
+VPC Traffic Mirroring permet de **copier le trafic réseau** des instances EC2 vers des appliances de sécurité pour inspection approfondie (IDS/IPS, Network Forensics).
+
+```
+┌────────────────────────────────────────────────────────┐
+│                      VPC                                │
+│                                                         │
+│  ┌──────────────┐                                      │
+│  │   EC2 Web    │────┐                                 │
+│  │   Instance   │    │ Trafic normal                   │
+│  └──────────────┘    │                                 │
+│                      │                                  │
+│                      ├────> Application Load Balancer  │
+│                      │                                  │
+│  ┌──────────────┐    │                                 │
+│  │   EC2 App    │────┘                                 │
+│  │   Instance   │                                      │
+│  └──────────────┘                                      │
+│         │                                               │
+│         │ Trafic mirroré (copie)                       │
+│         ▼                                               │
+│  ┌──────────────┐                                      │
+│  │  IDS/IPS     │                                      │
+│  │  Appliance   │                                      │
+│  │  (Suricata,  │                                      │
+│  │   Snort)     │                                      │
+│  └──────────────┘                                      │
+└────────────────────────────────────────────────────────┘
+```
+
+**Cas d'usage:**
+- 🔍 **Détection d'intrusion (IDS)** - Analyser le trafic pour détecter des patterns malveillants
+- 🛡️ **Prévention d'intrusion (IPS)** - Bloquer activement les menaces
+- 🔬 **Forensics réseau** - Capture complète pour investigation post-incident
+- 📊 **Conformité** - Monitoring requis par certaines régulations (PCI-DSS, HIPAA)
+
+### 2. Configuration Traffic Mirroring
+
+#### 2.1 Architecture Complète
+
+```hcl
+# Mirror Target (NLB pointant vers IDS instances)
+resource "aws_lb" "ids_nlb" {
+  name               = "ids-traffic-mirror-nlb"
+  internal           = true
+  load_balancer_type = "network"
+  subnets            = aws_subnet.private_app[*].id
+
+  enable_cross_zone_load_balancing = true
+
+  tags = {
+    Name = "IDS-Traffic-Mirror-NLB"
+  }
+}
+
+resource "aws_lb_target_group" "ids" {
+  name     = "ids-instances-tg"
+  port     = 4789  # VXLAN port
+  protocol = "UDP"
+  vpc_id   = aws_vpc.main.id
+
+  health_check {
+    protocol = "TCP"
+    port     = 22
+    interval = 30
+  }
+
+  tags = {
+    Name = "IDS-Target-Group"
+  }
+}
+
+# Enregistrer instances IDS
+resource "aws_lb_target_group_attachment" "ids" {
+  count            = 2
+  target_group_arn = aws_lb_target_group.ids.arn
+  target_id        = aws_instance.ids[count.index].id
+  port             = 4789
+}
+
+# Traffic Mirror Target
+resource "aws_ec2_traffic_mirror_target" "nlb" {
+  network_load_balancer_arn = aws_lb.ids_nlb.arn
+
+  description = "Mirror target for IDS/IPS appliances"
+
+  tags = {
+    Name = "IDS-Mirror-Target"
+  }
+}
+
+# Traffic Mirror Filter (définir quoi capturer)
+resource "aws_ec2_traffic_mirror_filter" "security" {
+  description = "Capture all traffic for security analysis"
+
+  tags = {
+    Name = "Security-Mirror-Filter"
+  }
+}
+
+# Règles de filtrage - Capture tout le trafic
+resource "aws_ec2_traffic_mirror_filter_rule" "inbound_all" {
+  traffic_mirror_filter_id = aws_ec2_traffic_mirror_filter.security.id
+
+  destination_cidr_block = "0.0.0.0/0"
+  source_cidr_block      = "0.0.0.0/0"
+
+  rule_action = "accept"
+  rule_number = 100
+  traffic_direction = "ingress"
+  protocol = 0  # All protocols
+}
+
+resource "aws_ec2_traffic_mirror_filter_rule" "outbound_all" {
+  traffic_mirror_filter_id = aws_ec2_traffic_mirror_filter.security.id
+
+  destination_cidr_block = "0.0.0.0/0"
+  source_cidr_block      = "0.0.0.0/0"
+
+  rule_action = "accept"
+  rule_number = 100
+  traffic_direction = "egress"
+  protocol = 0  # All protocols
+}
+
+# Traffic Mirror Session (attacher à une ENI)
+resource "aws_ec2_traffic_mirror_session" "web_tier" {
+  count = length(aws_instance.web)
+
+  traffic_mirror_filter_id = aws_ec2_traffic_mirror_filter.security.id
+  traffic_mirror_target_id = aws_ec2_traffic_mirror_target.nlb.id
+  network_interface_id     = aws_instance.web[count.index].primary_network_interface_id
+
+  session_number = count.index + 1
+
+  # Packet truncation (0 = capture complet, >0 = tronquer)
+  packet_length = 0  # Capture complète
+
+  # Virtual network identifier
+  virtual_network_id = 1000 + count.index
+
+  description = "Mirror session for web instance ${count.index}"
+
+  tags = {
+    Name = "Web-Tier-Mirror-Session-${count.index}"
+    Tier = "web"
+  }
+}
+```
+
+#### 2.2 Instance IDS avec Suricata
+
+**User Data pour instance IDS:**
+
+```bash
+#!/bin/bash
+# Installation et configuration Suricata IDS
+
+# Installation Suricata
+add-apt-repository ppa:oisf/suricata-stable -y
+apt-get update
+apt-get install suricata jq -y
+
+# Configuration pour recevoir trafic mirroré (VXLAN)
+cat > /etc/network/interfaces.d/vxlan.cfg <<'EOF'
+auto vxlan0
+iface vxlan0 inet manual
+    pre-up ip link add vxlan0 type vxlan id 1 local 10.0.10.50 dev eth0 dstport 4789
+    up ip link set vxlan0 up
+    down ip link set vxlan0 down
+    post-down ip link del vxlan0
+EOF
+
+# Activer VXLAN
+ifup vxlan0
+
+# Configuration Suricata
+cat > /etc/suricata/suricata.yaml <<'EOF'
+vars:
+  address-groups:
+    HOME_NET: "[10.0.0.0/16]"
+    EXTERNAL_NET: "!$HOME_NET"
+
+af-packet:
+  - interface: vxlan0
+    cluster-id: 99
+    cluster-type: cluster_flow
+    defrag: yes
+
+outputs:
+  - eve-log:
+      enabled: yes
+      filetype: regular
+      filename: /var/log/suricata/eve.json
+      types:
+        - alert:
+            payload: yes
+            payload-buffer-size: 4kb
+            payload-printable: yes
+            packet: yes
+        - http:
+            extended: yes
+        - dns:
+            query: yes
+            answer: yes
+        - tls:
+            extended: yes
+        - files:
+            force-magic: yes
+        - flow
+
+default-rule-path: /var/lib/suricata/rules
+rule-files:
+  - suricata.rules
+  - emerging-threats.rules
+  - custom-security.rules
+EOF
+
+# Télécharger règles Emerging Threats
+suricata-update
+
+# Règles personnalisées
+cat > /var/lib/suricata/rules/custom-security.rules <<'EOF'
+# SQL Injection
+alert http any any -> $HOME_NET any (msg:"SQL Injection Attempt Detected"; flow:to_server; http.uri; content:"union"; nocase; content:"select"; nocase; distance:0; classtype:web-application-attack; sid:1000001; rev:1;)
+
+# Command Injection
+alert http any any -> $HOME_NET any (msg:"Command Injection Attempt"; flow:to_server; http.uri; pcre:"/(;|\||`|\$\()/"; classtype:attempted-admin; sid:1000002; rev:1;)
+
+# Crypto Mining
+alert tcp any any -> any any (msg:"Cryptocurrency Mining Activity"; flow:to_server; content:"{\"method\":\""; content:"mining."; distance:0; classtype:trojan-activity; sid:1000003; rev:1;)
+
+# Data Exfiltration - Large Transfer
+alert tcp $HOME_NET any -> $EXTERNAL_NET any (msg:"Large Data Transfer - Potential Exfiltration"; flow:to_server; threshold:type both, track by_src, count 1, seconds 60; dsize:>10000000; classtype:data-loss; sid:1000004; rev:1;)
+
+# Suspicious User Agents
+alert http any any -> $HOME_NET any (msg:"Suspicious User Agent - SQLMap"; flow:to_server; http.user_agent; content:"sqlmap"; nocase; classtype:web-application-attack; sid:1000005; rev:1;)
+alert http any any -> $HOME_NET any (msg:"Suspicious User Agent - Nikto"; flow:to_server; http.user_agent; content:"Nikto"; nocase; classtype:web-application-attack; sid:1000006; rev:1;)
+
+# Backdoor Communication
+alert tcp $HOME_NET any -> $EXTERNAL_NET any (msg:"Potential Backdoor Beacon"; flow:to_server; threshold:type both, track by_src, count 10, seconds 60; dsize:<100; classtype:trojan-activity; sid:1000007; rev:1;)
+EOF
+
+# Démarrer Suricata
+systemctl enable suricata
+systemctl start suricata
+
+# CloudWatch Logs Agent pour envoyer alertes
+cat > /opt/aws/amazon-cloudwatch-agent/etc/config.json <<'EOF'
+{
+  "logs": {
+    "logs_collected": {
+      "files": {
+        "collect_list": [
+          {
+            "file_path": "/var/log/suricata/eve.json",
+            "log_group_name": "/aws/ids/suricata",
+            "log_stream_name": "{instance_id}",
+            "timezone": "UTC"
+          }
+        ]
+      }
+    }
+  }
+}
+EOF
+
+# Installer CloudWatch Agent
+wget https://s3.amazonaws.com/amazoncloudwatch-agent/ubuntu/amd64/latest/amazon-cloudwatch-agent.deb
+dpkg -i amazon-cloudwatch-agent.deb
+/opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -s -c file:/opt/aws/amazon-cloudwatch-agent/etc/config.json
+```
+
+#### 2.3 Analyse des Alertes Suricata
+
+**Lambda pour traiter alertes critiques:**
+
+```python
+import json
+import boto3
+import os
+from datetime import datetime
+
+sns = boto3.client('sns')
+guardduty = boto3.client('guardduty')
+
+CRITICAL_SIGNATURES = [
+    'SQL Injection',
+    'Command Injection',
+    'Data Exfiltration',
+    'Backdoor',
+    'Crypto Mining'
+]
+
+def lambda_handler(event, context):
+    """
+    Traite les logs Suricata depuis CloudWatch Logs
+    et génère des alertes pour signatures critiques
+    """
+
+    # Décoder le log CloudWatch
+    log_data = json.loads(event['awslogs']['data'])
+
+    for log_event in log_data['logEvents']:
+        try:
+            suricata_event = json.loads(log_event['message'])
+
+            # Vérifier si c'est une alerte
+            if suricata_event.get('event_type') == 'alert':
+                alert = suricata_event['alert']
+                signature = alert.get('signature', '')
+                severity = alert.get('severity', 0)
+
+                # Alerte critique ?
+                is_critical = any(sig in signature for sig in CRITICAL_SIGNATURES)
+
+                if is_critical or severity <= 2:
+                    # Extraire informations
+                    src_ip = suricata_event.get('src_ip', 'unknown')
+                    dst_ip = suricata_event.get('dest_ip', 'unknown')
+                    dst_port = suricata_event.get('dest_port', 'unknown')
+
+                    # Créer message alerte
+                    message = f"""
+CRITICAL SECURITY ALERT - IDS Detection
+
+Signature: {signature}
+Severity: {severity}
+Source IP: {src_ip}
+Destination IP: {dst_ip}
+Destination Port: {dst_port}
+Timestamp: {suricata_event.get('timestamp')}
+
+Payload (first 500 chars):
+{suricata_event.get('payload', '')[:500]}
+
+Action Required:
+1. Investigate source IP in VPC Flow Logs
+2. Check GuardDuty findings for correlation
+3. Isolate affected instance if confirmed malicious
+4. Review application logs for compromise indicators
+
+Log Stream: {log_data['logStream']}
+"""
+
+                    # Envoyer SNS
+                    sns.publish(
+                        TopicArn=os.environ['SNS_TOPIC_ARN'],
+                        Subject=f'🚨 CRITICAL IDS ALERT: {signature}',
+                        Message=message
+                    )
+
+                    # Créer custom GuardDuty finding
+                    # (nécessite GuardDuty detector configuré)
+
+        except json.JSONDecodeError:
+            continue
+
+    return {'statusCode': 200}
+```
+
+**CloudWatch Logs Insights pour analyse Suricata:**
+
+```sql
+# Top 20 signatures détectées
+fields @timestamp, alert.signature, src_ip, dest_ip
+| filter event_type = "alert"
+| stats count(*) as alertCount by alert.signature, alert.severity
+| sort alertCount desc
+| limit 20
+
+# IPs sources les plus malveillantes
+fields @timestamp, src_ip, alert.signature
+| filter event_type = "alert"
+| stats count_distinct(alert.signature) as uniqueThreats, count(*) as totalAlerts by src_ip
+| sort totalAlerts desc
+| limit 50
+
+# Détection de scan de ports
+fields @timestamp, src_ip, dest_port
+| filter event_type = "alert"
+| filter alert.signature like /scan|probe/
+| stats count_distinct(dest_port) as uniquePorts by src_ip
+| filter uniquePorts > 10
+| sort uniquePorts desc
+
+# Timeline des attaques
+fields @timestamp, alert.signature, src_ip
+| filter event_type = "alert"
+| filter alert.severity <= 2
+| sort @timestamp desc
+```
+
+### 3. Filtrage Avancé Traffic Mirroring
+
+#### 3.1 Filtres Sélectifs par Port
+
+```hcl
+# Capturer uniquement trafic web (HTTP/HTTPS)
+resource "aws_ec2_traffic_mirror_filter" "web_only" {
+  description = "Capture HTTP/HTTPS traffic only"
+
+  tags = {
+    Name = "Web-Traffic-Filter"
+  }
+}
+
+resource "aws_ec2_traffic_mirror_filter_rule" "http_inbound" {
+  traffic_mirror_filter_id = aws_ec2_traffic_mirror_filter.web_only.id
+
+  destination_cidr_block = "0.0.0.0/0"
+  source_cidr_block      = "0.0.0.0/0"
+  destination_port_range {
+    from_port = 80
+    to_port   = 80
+  }
+
+  rule_action = "accept"
+  rule_number = 100
+  traffic_direction = "ingress"
+  protocol = 6  # TCP
+}
+
+resource "aws_ec2_traffic_mirror_filter_rule" "https_inbound" {
+  traffic_mirror_filter_id = aws_ec2_traffic_mirror_filter.web_only.id
+
+  destination_cidr_block = "0.0.0.0/0"
+  source_cidr_block      = "0.0.0.0/0"
+  destination_port_range {
+    from_port = 443
+    to_port   = 443
+  }
+
+  rule_action = "accept"
+  rule_number = 101
+  traffic_direction = "ingress"
+  protocol = 6  # TCP
+}
+```
+
+#### 3.2 Filtres par IP Source/Destination
+
+```hcl
+# Capturer uniquement trafic depuis IPs externes suspectes
+resource "aws_ec2_traffic_mirror_filter" "suspicious_ips" {
+  description = "Capture traffic from known malicious IPs"
+
+  tags = {
+    Name = "Suspicious-IPs-Filter"
+  }
+}
+
+resource "aws_ec2_traffic_mirror_filter_rule" "threat_intel" {
+  traffic_mirror_filter_id = aws_ec2_traffic_mirror_filter.suspicious_ips.id
+
+  # Liste d'IPs malveillantes (exemple)
+  source_cidr_block = "198.51.100.0/24"  # Remplacer par IPs réelles
+  destination_cidr_block = "10.0.0.0/16"  # Votre VPC
+
+  rule_action = "accept"
+  rule_number = 100
+  traffic_direction = "ingress"
+  protocol = 0  # All
+}
+```
+
+### 4. Coût et Performance
+
+**Considérations de coût:**
+
+| Composant | Coût | Notes |
+|-----------|------|-------|
+| **Traffic Mirroring Session** | €0.015/heure/ENI | ~€11/mois par instance mirrorée |
+| **Data Processed** | €0.015/GB | Trafic copié facturé |
+| **NLB for IDS** | €0.023/heure + €0.006/LCU | ~€20/mois + usage |
+| **EC2 IDS Instances** | Variable | c5.xlarge ~€150/mois |
+
+**Exemple:** Mirroring 10 instances web avec 1TB/mois trafic:
+- Sessions: 10 × €11 = €110/mois
+- Data: 1000GB × €0.015 = €15/mois
+- NLB: ~€25/mois
+- IDS instances (2x c5.xlarge): €300/mois
+- **Total: ~€450/mois**
+
+**Optimisation:**
+- ✅ Utiliser filtres sélectifs (seulement trafic critique)
+- ✅ Packet truncation pour réduire volume
+- ✅ Activer mirroring uniquement sur instances sensibles
+
+---
+
+## Route 53 Resolver DNS Firewall
+
+### 1. Protection DNS Layer
+
+Route 53 Resolver DNS Firewall permet de **bloquer les requêtes DNS malveillantes** au niveau du VPC, empêchant la communication avec des domaines de phishing, malware, et command & control.
+
+```
+┌────────────────────────────────────────────────────────┐
+│                      VPC                                │
+│                                                         │
+│  ┌──────────────┐                                      │
+│  │  Instance    │                                      │
+│  │    EC2       │                                      │
+│  └──────┬───────┘                                      │
+│         │                                               │
+│         │ DNS Query: malicious-domain.com              │
+│         ▼                                               │
+│  ┌──────────────────────────────┐                      │
+│  │  Route 53 Resolver           │                      │
+│  │  DNS Firewall                │                      │
+│  │                               │                      │
+│  │  ✅ Check Domain Lists        │                      │
+│  │  ❌ BLOCK if malicious        │                      │
+│  └──────────────────────────────┘                      │
+│         │                                               │
+│         │ If allowed                                    │
+│         ▼                                               │
+│  Public DNS (8.8.8.8, 1.1.1.1)                         │
+└────────────────────────────────────────────────────────┘
+```
+
+### 2. Configuration DNS Firewall
+
+#### 2.1 Listes de Domaines AWS Managed
+
+```hcl
+# Association DNS Firewall au VPC
+resource "aws_route53_resolver_firewall_rule_group_association" "main" {
+  name                   = "production-dns-firewall"
+  firewall_rule_group_id = aws_route53_resolver_firewall_rule_group.security.id
+  vpc_id                 = aws_vpc.main.id
+  priority               = 100
+
+  tags = {
+    Name = "Production-DNS-Firewall"
+  }
+}
+
+# Rule Group avec règles multiples
+resource "aws_route53_resolver_firewall_rule_group" "security" {
+  name = "security-dns-rules"
+
+  tags = {
+    Name = "Security-DNS-Rules"
+  }
+}
+
+# Règle 1: Bloquer domaines malveillants AWS Managed
+resource "aws_route53_resolver_firewall_rule" "block_malware" {
+  name                    = "block-malware-domains"
+  firewall_rule_group_id  = aws_route53_resolver_firewall_rule_group.security.id
+  firewall_domain_list_id = "rslvr-fdl-xxxxxx"  # AWS Managed Threat List
+  priority                = 100
+  action                  = "BLOCK"
+  block_response          = "NXDOMAIN"
+
+  # Override pour certains domaines si faux positif
+  block_override_domain = "blocked.example.com"
+  block_override_dns_type = "CNAME"
+  block_override_ttl     = 60
+}
+
+# Règle 2: Bloquer domaines de phishing
+resource "aws_route53_resolver_firewall_rule" "block_phishing" {
+  name                    = "block-phishing-domains"
+  firewall_rule_group_id  = aws_route53_resolver_firewall_rule_group.security.id
+  firewall_domain_list_id = aws_route53_resolver_firewall_domain_list.phishing.id
+  priority                = 200
+  action                  = "BLOCK"
+  block_response          = "NXDOMAIN"
+}
+
+# Règle 3: Alerter sur domaines suspects (sans bloquer)
+resource "aws_route53_resolver_firewall_rule" "alert_suspicious" {
+  name                    = "alert-suspicious-domains"
+  firewall_rule_group_id  = aws_route53_resolver_firewall_rule_group.security.id
+  firewall_domain_list_id = aws_route53_resolver_firewall_domain_list.suspicious.id
+  priority                = 300
+  action                  = "ALERT"  # Log uniquement, ne bloque pas
+}
+
+# Règle 4: Whitelist domaines légitimes
+resource "aws_route53_resolver_firewall_rule" "allow_corporate" {
+  name                    = "allow-corporate-domains"
+  firewall_rule_group_id  = aws_route53_resolver_firewall_rule_group.security.id
+  firewall_domain_list_id = aws_route53_resolver_firewall_domain_list.whitelist.id
+  priority                = 50  # Plus haute priorité
+  action                  = "ALLOW"
+}
+```
+
+#### 2.2 Domain Lists Personnalisées
+
+```hcl
+# Liste de domaines de phishing
+resource "aws_route53_resolver_firewall_domain_list" "phishing" {
+  name = "phishing-domains"
+
+  domains = [
+    "paypai.com",                    # Typosquatting PayPal
+    "microsoftonline-login.com",     # Phishing Microsoft
+    "amazon-security-alert.com",     # Phishing Amazon
+    "appleid-verify.com",            # Phishing Apple
+    "*.tk",                          # TLD suspect (free domain)
+    "*.ml",                          # TLD suspect
+    "*.ga",                          # TLD suspect
+    "*.cf",                          # TLD suspect
+  ]
+
+  tags = {
+    Name = "Phishing-Domains-List"
+    Type = "Blocklist"
+  }
+}
+
+# Liste de domaines suspects (alert only)
+resource "aws_route53_resolver_firewall_domain_list" "suspicious" {
+  name = "suspicious-domains"
+
+  domains = [
+    "*.xyz",                        # TLD souvent utilisé pour malware
+    "*.top",                        # TLD suspect
+    "*.gq",                         # TLD suspect
+    "dyn.dns.org",                  # Dynamic DNS (C2 potentiel)
+    "*.no-ip.org",                  # Dynamic DNS
+  ]
+
+  tags = {
+    Name = "Suspicious-Domains-List"
+    Type = "Watchlist"
+  }
+}
+
+# Whitelist (domaines toujours autorisés)
+resource "aws_route53_resolver_firewall_domain_list" "whitelist" {
+  name = "corporate-whitelist"
+
+  domains = [
+    "*.company.com",
+    "*.aws.amazon.com",
+    "*.github.com",
+    "*.docker.io",
+    "*.npmjs.org",
+  ]
+
+  tags = {
+    Name = "Corporate-Whitelist"
+    Type = "Allowlist"
+  }
+}
+```
+
+#### 2.3 Intégration Threat Intelligence
+
+**Lambda pour mise à jour automatique des listes:**
+
+```python
+import boto3
+import requests
+import json
+from datetime import datetime
+
+route53resolver = boto3.client('route53resolver')
+s3 = boto3.client('s3')
+
+# Sources de Threat Intelligence
+THREAT_FEEDS = [
+    'https://urlhaus.abuse.ch/downloads/text/',
+    'https://raw.githubusercontent.com/mitchellkrogza/Phishing.Database/master/phishing-domains-ACTIVE.txt',
+]
+
+def lambda_handler(event, context):
+    """
+    Met à jour DNS Firewall domain lists avec dernières menaces
+    """
+
+    all_domains = set()
+
+    # Télécharger feeds
+    for feed_url in THREAT_FEEDS:
+        try:
+            response = requests.get(feed_url, timeout=30)
+            domains = response.text.strip().split('\n')
+
+            # Nettoyer et ajouter
+            for domain in domains:
+                domain = domain.strip()
+                if domain and not domain.startswith('#'):
+                    # Extraire domaine (ignorer http://, etc.)
+                    if '://' in domain:
+                        domain = domain.split('://')[1].split('/')[0]
+                    all_domains.add(domain.lower())
+
+        except Exception as e:
+            print(f"Error fetching {feed_url}: {e}")
+            continue
+
+    # Limiter à 1000 domaines (limite AWS)
+    top_domains = list(all_domains)[:1000]
+
+    # Mettre à jour domain list
+    domain_list_id = 'rslvr-fdl-xxxxxx'  # Votre domain list ID
+
+    try:
+        # Route 53 Resolver ne supporte pas update direct
+        # Stratégie: créer nouvelle liste et swap
+
+        new_list = route53resolver.create_firewall_domain_list(
+            Name=f'threat-intel-{datetime.now().strftime("%Y%m%d")}',
+            Tags=[
+                {'Key': 'Source', 'Value': 'Automated-Threat-Intel'},
+                {'Key': 'Updated', 'Value': datetime.now().isoformat()}
+            ]
+        )
+
+        new_list_id = new_list['FirewallDomainList']['Id']
+
+        # Ajouter domaines (batch de 1000)
+        route53resolver.update_firewall_domains(
+            FirewallDomainListId=new_list_id,
+            Operation='ADD',
+            Domains=top_domains
+        )
+
+        # Mettre à jour rule pour utiliser nouvelle liste
+        # (nécessite reconfiguration Terraform ou API call)
+
+        print(f"✅ Updated DNS Firewall with {len(top_domains)} malicious domains")
+
+        # Archiver dans S3
+        s3.put_object(
+            Bucket='security-threat-intel',
+            Key=f'dns-blocklist/{datetime.now().strftime("%Y/%m/%d")}/domains.json',
+            Body=json.dumps({
+                'timestamp': datetime.now().isoformat(),
+                'domain_count': len(top_domains),
+                'domains': top_domains
+            })
+        )
+
+        return {
+            'statusCode': 200,
+            'domains_added': len(top_domains),
+            'new_list_id': new_list_id
+        }
+
+    except Exception as e:
+        print(f"Error updating DNS Firewall: {e}")
+        return {'statusCode': 500, 'error': str(e)}
+```
+
+**EventBridge pour exécution quotidienne:**
+
+```hcl
+resource "aws_cloudwatch_event_rule" "update_dns_firewall" {
+  name                = "update-dns-firewall-daily"
+  description         = "Update DNS Firewall threat lists daily"
+  schedule_expression = "cron(0 2 * * ? *)"  # 2AM UTC chaque jour
+
+  tags = {
+    Name = "DNS-Firewall-Update-Rule"
+  }
+}
+
+resource "aws_cloudwatch_event_target" "lambda" {
+  rule      = aws_cloudwatch_event_rule.update_dns_firewall.name
+  target_id = "UpdateDNSFirewallLambda"
+  arn       = aws_lambda_function.update_dns_firewall.arn
+}
+```
+
+### 3. Monitoring DNS Firewall
+
+#### 3.1 Query Logs Configuration
+
+```hcl
+# Activer DNS Query Logs
+resource "aws_route53_resolver_query_log_config" "main" {
+  name            = "production-dns-query-logs"
+  destination_arn = aws_cloudwatch_log_group.dns_queries.arn
+
+  tags = {
+    Name = "DNS-Query-Logs"
+  }
+}
+
+resource "aws_route53_resolver_query_log_config_association" "main" {
+  resolver_query_log_config_id = aws_route53_resolver_query_log_config.main.id
+  resource_id                  = aws_vpc.main.id
+}
+
+resource "aws_cloudwatch_log_group" "dns_queries" {
+  name              = "/aws/route53/dns-queries"
+  retention_in_days = 30
+
+  tags = {
+    Environment = "production"
+  }
+}
+```
+
+#### 3.2 Analyses CloudWatch Logs Insights
+
+```sql
+# Domaines bloqués les plus fréquents
+fields @timestamp, query_name, firewall_rule_action
+| filter firewall_rule_action = "BLOCK"
+| stats count(*) as blockCount by query_name
+| sort blockCount desc
+| limit 50
+
+# Instances faisant le plus de requêtes bloquées
+fields @timestamp, srcaddr, query_name, firewall_rule_action
+| filter firewall_rule_action = "BLOCK"
+| stats count(*) as blockedQueries by srcaddr
+| sort blockedQueries desc
+| limit 20
+
+# Timeline des tentatives de connexion à C2
+fields @timestamp, srcaddr, query_name
+| filter firewall_rule_action = "BLOCK"
+| filter query_name like /malicious|phishing|suspicious/
+| sort @timestamp desc
+
+# Détection d'exfiltration DNS potentielle (requêtes longues)
+fields @timestamp, query_name, srcaddr
+| filter strlen(query_name) > 50
+| stats count(*) as longQueries by srcaddr, query_name
+| sort longQueries desc
+```
+
+#### 3.3 Alarmes CloudWatch
+
+```hcl
+# Alarme pour haute fréquence de blocages
+resource "aws_cloudwatch_metric_alarm" "dns_high_blocks" {
+  alarm_name          = "dns-firewall-high-block-rate"
+  alarm_description   = "High rate of DNS queries blocked by firewall"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 2
+  metric_name         = "BlockedQueries"
+  namespace           = "AWS/Route53Resolver"
+  period              = 300
+  statistic           = "Sum"
+  threshold           = 100
+  treat_missing_data  = "notBreaching"
+
+  alarm_actions = [aws_sns_topic.security_alerts.arn]
+
+  dimensions = {
+    FirewallRuleGroupId = aws_route53_resolver_firewall_rule_group.security.id
+  }
+}
+```
+
+---
+
+## Sécurité IPv6
+
+### 1. Considérations IPv6 dans AWS
+
+AWS supporte **dual-stack** (IPv4 + IPv6) pour les VPCs. IPv6 introduit des considérations de sécurité spécifiques.
+
+#### 1.1 Différences Clés IPv4 vs IPv6
+
+| Aspect | IPv4 | IPv6 |
+|--------|------|------|
+| **Adressage** | 32 bits (10.0.0.0/16) | 128 bits (2001:db8::/32) |
+| **NAT** | Courant (NAT Gateway) | Non requis (toutes IPs publiques) |
+| **Scanning** | Possible (petits réseaux) | Impraticable (espace énorme) |
+| **Sécurité** | Firewalls matures | Parfois oublié dans règles |
+
+**⚠️ RISQUE MAJEUR:**
+En IPv6, **toutes les instances ont une adresse IP publique** - il n'y a pas de NAT Gateway. Les Security Groups et NACLs sont **critiques**.
+
+### 2. Configuration Sécurisée IPv6
+
+#### 2.1 VPC Dual-Stack
+
+```hcl
+# VPC avec support IPv6
+resource "aws_vpc" "main" {
+  cidr_block                       = "10.0.0.0/16"
+  assign_generated_ipv6_cidr_block = true
+  enable_dns_hostnames             = true
+  enable_dns_support               = true
+
+  tags = {
+    Name = "production-vpc-dual-stack"
+  }
+}
+
+# Subnet avec IPv6
+resource "aws_subnet" "private_app" {
+  vpc_id                          = aws_vpc.main.id
+  cidr_block                      = "10.0.10.0/24"
+  ipv6_cidr_block                 = cidrsubnet(aws_vpc.main.ipv6_cidr_block, 8, 10)
+  assign_ipv6_address_on_creation = true  # ⚠️ Instances auront IP publique
+
+  tags = {
+    Name = "private-app-subnet-ipv6"
+  }
+}
+
+# Egress-Only Internet Gateway (IPv6 équivalent NAT Gateway)
+resource "aws_egress_only_internet_gateway" "main" {
+  vpc_id = aws_vpc.main.id
+
+  tags = {
+    Name = "ipv6-egress-only-igw"
+  }
+}
+
+# Route table pour IPv6 (sortie uniquement)
+resource "aws_route" "ipv6_egress" {
+  route_table_id              = aws_route_table.private_app.id
+  destination_ipv6_cidr_block = "::/0"
+  egress_only_gateway_id      = aws_egress_only_internet_gateway.main.id
+}
+```
+
+#### 2.2 Security Groups IPv6
+
+```hcl
+# Security Group avec règles IPv6
+resource "aws_security_group" "app_dual_stack" {
+  name        = "app-tier-dual-stack"
+  description = "App tier with IPv4 and IPv6 support"
+  vpc_id      = aws_vpc.main.id
+
+  # IPv4 - HTTP depuis ALB
+  ingress {
+    from_port       = 80
+    to_port         = 80
+    protocol        = "tcp"
+    security_groups = [aws_security_group.alb.id]
+    description     = "HTTP from ALB (IPv4)"
+  }
+
+  # IPv6 - HTTP depuis ALB
+  ingress {
+    from_port        = 80
+    to_port          = 80
+    protocol         = "tcp"
+    ipv6_cidr_blocks = ["::/0"]  # ⚠️ À restreindre en production
+    description      = "HTTP from ALB (IPv6)"
+  }
+
+  # Egress IPv4
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  # Egress IPv6
+  egress {
+    from_port        = 0
+    to_port          = 0
+    protocol         = "-1"
+    ipv6_cidr_blocks = ["::/0"]
+  }
+
+  tags = {
+    Name = "app-tier-dual-stack-sg"
+  }
+}
+
+# ⚠️ IMPORTANT: Bloquer tout accès IPv6 entrant non nécessaire
+resource "aws_security_group" "db_ipv6_restricted" {
+  name        = "db-tier-ipv6-restricted"
+  description = "Database tier - IPv6 completely blocked"
+  vpc_id      = aws_vpc.main.id
+
+  # IPv4 - MySQL depuis app tier
+  ingress {
+    from_port       = 3306
+    to_port         = 3306
+    protocol        = "tcp"
+    security_groups = [aws_security_group.app_dual_stack.id]
+  }
+
+  # IPv6 - AUCUN accès entrant
+  # (pas de règle ingress IPv6 = deny all)
+
+  # Egress IPv4 uniquement
+  egress {
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  # PAS d'egress IPv6 pour base de données
+
+  tags = {
+    Name = "db-tier-ipv6-restricted-sg"
+  }
+}
+```
+
+#### 2.3 Network ACLs IPv6
+
+```hcl
+# NACL pour bloquer IPv6 sur tier sensible
+resource "aws_network_acl" "db_ipv6_blocked" {
+  vpc_id     = aws_vpc.main.id
+  subnet_ids = aws_subnet.private_db[*].id
+
+  # Bloquer TOUT trafic IPv6 entrant
+  ingress {
+    rule_no         = 50
+    protocol        = "-1"
+    action          = "deny"
+    ipv6_cidr_block = "::/0"
+    from_port       = 0
+    to_port         = 0
+  }
+
+  # Permettre IPv4 depuis app tier
+  ingress {
+    rule_no    = 100
+    protocol   = "tcp"
+    action     = "allow"
+    cidr_block = "10.0.10.0/23"
+    from_port  = 3306
+    to_port    = 3306
+  }
+
+  # Bloquer TOUT trafic IPv6 sortant
+  egress {
+    rule_no         = 50
+    protocol        = "-1"
+    action          = "deny"
+    ipv6_cidr_block = "::/0"
+    from_port       = 0
+    to_port         = 0
+  }
+
+  # Permettre IPv4 replies
+  egress {
+    rule_no    = 100
+    protocol   = "tcp"
+    action     = "allow"
+    cidr_block = "10.0.10.0/23"
+    from_port  = 1024
+    to_port    = 65535
+  }
+
+  tags = {
+    Name = "db-tier-ipv6-blocked-nacl"
+  }
+}
+```
+
+### 3. Monitoring IPv6
+
+#### 3.1 VPC Flow Logs IPv6
+
+```sql
+# CloudWatch Logs Insights - Analyser trafic IPv6
+fields @timestamp, srcAddr, dstAddr, srcPort, dstPort, action
+| filter srcAddr like /^(2[0-9a-f]{3}|fd)/  # IPv6 addresses
+| stats count(*) as ipv6Traffic by action
+| sort ipv6Traffic desc
+
+# Connexions IPv6 rejetées
+fields @timestamp, srcAddr, dstAddr, dstPort
+| filter srcAddr like /^(2[0-9a-f]{3}|fd)/
+| filter action = "REJECT"
+| stats count(*) as rejectedIPv6 by srcAddr, dstPort
+| sort rejectedIPv6 desc
+```
+
+### 4. Best Practices IPv6
+
+**✅ RECOMMANDATIONS:**
+
+1. **Désactiver IPv6 si non nécessaire:**
+   ```hcl
+   resource "aws_vpc" "main" {
+     cidr_block                       = "10.0.0.0/16"
+     assign_generated_ipv6_cidr_block = false  # Désactiver IPv6
+   }
+   ```
+
+2. **Utiliser Egress-Only Internet Gateway:**
+   - Permet sortie IPv6 (comme NAT Gateway pour IPv4)
+   - Bloque tout trafic entrant non sollicité
+
+3. **Security Groups stricts:**
+   - **JAMAIS** `::/0` sur ingress pour ressources sensibles
+   - Spécifier explicitement les IPv6 CIDR autorisés
+
+4. **NACLs en defense-in-depth:**
+   - Bloquer IPv6 sur subnets où non requis
+   - Règles DENY en priorité haute
+
+5. **Monitoring:**
+   - VPC Flow Logs configurés pour IPv6
+   - Alertes sur trafic IPv6 inattendu
+
+---
+
 ## Troubleshooting Réseau
 
 ### 1. Diagnostic de Connectivité
