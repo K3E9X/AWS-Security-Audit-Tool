@@ -208,6 +208,42 @@ Cette collection de 6 documents représente un guide complet et détaillé pour 
 
 ---
 
+## 📄 Formats Disponibles
+
+### Markdown (GitHub)
+Tous les guides sont disponibles en format Markdown dans ce répertoire pour consultation en ligne sur GitHub.
+
+### PDF (Téléchargement)
+Des versions PDF professionnelles de tous les guides sont disponibles dans le répertoire `pdf/` :
+
+| Document | Taille | Lien |
+|----------|--------|------|
+| **README** | ~0.14 MB | [README.pdf](./pdf/README.pdf) |
+| **Executive Summary** | ~0.10 MB | [00-Executive-Summary.pdf](./pdf/00-Executive-Summary.pdf) |
+| **IAM Security Guide** | ~0.07 MB | [01-IAM-Security-Guide.pdf](./pdf/01-IAM-Security-Guide.pdf) |
+| **Network Security Guide** | ~0.07 MB | [02-Network-Security-Guide.pdf](./pdf/02-Network-Security-Guide.pdf) |
+| **Hosting Security Guide** | ~0.09 MB | [03-Hosting-Security-Guide.pdf](./pdf/03-Hosting-Security-Guide.pdf) |
+| **CloudWatch Supervision Guide** | ~0.07 MB | [04-CloudWatch-Supervision-Guide.pdf](./pdf/04-CloudWatch-Supervision-Guide.pdf) |
+| **Applications & Storage Security Guide** | ~0.08 MB | [05-Applications-Storage-Security-Guide.pdf](./pdf/05-Applications-Storage-Security-Guide.pdf) |
+
+**Avantages des PDFs :**
+- ✅ Impression professionnelle pour présentations clients
+- ✅ Navigation hors-ligne
+- ✅ Archivage documentaire
+- ✅ Partage facile par email
+- ✅ Format AWS (couleurs officielles)
+
+**Pour télécharger tous les PDFs :**
+```bash
+# Depuis GitHub
+git clone https://github.com/K3E9X/AWS-Security-Audit-Tool.git
+cd AWS-Security-Audit-Tool/security-guides/pdf/
+
+# Ou télécharger individuellement depuis GitHub
+```
+
+---
+
 ## 📊 Statistiques Clés
 
 ### Recherche Effectuée

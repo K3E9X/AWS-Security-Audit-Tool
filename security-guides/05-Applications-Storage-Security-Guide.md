@@ -839,6 +839,1180 @@ def detect_sensitive_changes(record):
 
 ---
 
+## Scénarios d'Attaque et Détection
+
+### Scénario 1: S3 Bucket Hijacking via Subdomain Takeover
+
+**Contexte:**
+Un attaquant trouve un enregistrement DNS pointant vers un bucket S3 qui n'existe plus ou est mal configuré.
+
+**Attack Vector:**
+
+```bash
+# L'attaquant découvre un sous-domaine orphelin
+dig files.example.com
+# Réponse: files.example.com CNAME files-example-bucket.s3.amazonaws.com
+
+# Le bucket n'existe pas - l'attaquant le crée
+aws s3 mb s3://files-example-bucket --region us-east-1
+
+# L'attaquant héberge du contenu malveillant
+echo "<html><body>Malicious content</body></html>" > index.html
+aws s3 cp index.html s3://files-example-bucket/ --acl public-read
+aws s3 website s3://files-example-bucket/ --index-document index.html
+```
+
+**Prévention:**
+
+1. **Supprimer les enregistrements DNS immédiatement lors de la suppression d'un bucket**
+2. **Réserver les noms de buckets** même après suppression (créer un bucket vide)
+3. **Monitoring CloudTrail** pour détecter les créations de buckets avec des noms similaires
+
+```sql
+# Query CloudWatch Logs Insights pour détecter
+fields @timestamp, requestParameters.bucketName, userIdentity.arn
+| filter eventName = "CreateBucket"
+| filter requestParameters.bucketName like /^(files|assets|static|media)/
+| stats count(*) as bucketCreations by requestParameters.bucketName, userIdentity.accountId
+| filter userIdentity.accountId != "YOUR_ACCOUNT_ID"
+```
+
+**Détection:**
+
+```python
+import boto3
+
+def audit_bucket_dns_alignment():
+    """Vérifier que tous les buckets ont des enregistrements DNS valides"""
+    s3 = boto3.client('s3')
+    route53 = boto3.client('route53')
+
+    buckets = s3.list_buckets()['Buckets']
+
+    for bucket in buckets:
+        bucket_name = bucket['Name']
+
+        # Vérifier si un enregistrement DNS pointe vers ce bucket
+        # Si oui, s'assurer que le bucket est propriété du compte
+        # Sinon, alerter
+
+        try:
+            bucket_acl = s3.get_bucket_acl(Bucket=bucket_name)
+            # Vérifier ownership
+        except Exception as e:
+            print(f"Bucket {bucket_name} access issue: {e}")
+```
+
+### Scénario 2: SQL Injection via RDS
+
+**Contexte:**
+Une application vulnérable permet l'injection SQL, exposant les données RDS.
+
+**Attack Example:**
+
+```python
+# ❌ CODE VULNÉRABLE
+def get_user(user_id):
+    query = f"SELECT * FROM users WHERE id = '{user_id}'"
+    cursor.execute(query)
+    return cursor.fetchone()
+
+# Attaque: user_id = "1' OR '1'='1"
+# Query résultante: SELECT * FROM users WHERE id = '1' OR '1'='1'
+# Résultat: Tous les utilisateurs retournés
+```
+
+**Protection:**
+
+```python
+# ✅ CODE SÉCURISÉ - Prepared Statements
+def get_user(user_id):
+    query = "SELECT * FROM users WHERE id = %s"
+    cursor.execute(query, (user_id,))
+    return cursor.fetchone()
+```
+
+**Détection via RDS Performance Insights:**
+
+```sql
+-- Détecter les requêtes SQL suspectes
+SELECT
+    query_text,
+    calls,
+    total_time,
+    mean_time
+FROM pg_stat_statements
+WHERE query_text LIKE '%OR%=%'
+   OR query_text LIKE '%UNION%SELECT%'
+   OR query_text LIKE '%DROP%TABLE%'
+   OR query_text LIKE '%--'
+   OR query_text LIKE '%/*'
+ORDER BY calls DESC
+LIMIT 20;
+```
+
+**Monitoring CloudWatch:**
+
+```python
+import boto3
+import re
+
+cloudwatch = boto3.client('cloudwatch')
+logs = boto3.client('logs')
+
+def detect_sql_injection_attempts():
+    """Détecter les tentatives d'injection SQL dans les logs RDS"""
+
+    sql_injection_patterns = [
+        r"(\%27)|(\')|(\-\-)|(\%23)|(#)",  # Single quote, comment
+        r"((\%3D)|(=))[^\n]*((\%27)|(\')|(\-\-)|(\%3B)|(;))",  # SQL operators
+        r"\w*((\%27)|(\'))((\%6F)|o|(\%4F))((\%72)|r|(\%52))",  # OR keyword
+        r"((\%27)|(\'))union",  # UNION keyword
+    ]
+
+    response = logs.filter_log_events(
+        logGroupName='/aws/rds/instance/prod-database/postgresql',
+        filterPattern='ERROR',
+        limit=100
+    )
+
+    for event in response.get('events', []):
+        message = event['message']
+        for pattern in sql_injection_patterns:
+            if re.search(pattern, message, re.IGNORECASE):
+                # Alerte injection SQL détectée
+                print(f"SQL Injection detected: {message}")
+                send_security_alert("SQL Injection Attempt", message)
+```
+
+### Scénario 3: API Abuse - Credential Stuffing
+
+**Contexte:**
+Un attaquant utilise des credentials volés pour tester l'accès à l'API.
+
+**Attack Pattern:**
+
+```bash
+# L'attaquant utilise un dictionnaire de credentials
+for cred in credentials_list:
+    curl -X POST https://api.example.com/auth/login \
+      -H "Content-Type: application/json" \
+      -d "{\"email\":\"${cred.email}\",\"password\":\"${cred.password}\"}"
+```
+
+**Détection:**
+
+```python
+# Lambda Authorizer avec détection de brute force
+import boto3
+from datetime import datetime, timedelta
+
+dynamodb = boto3.resource('dynamodb')
+table = dynamodb.Table('LoginAttempts')
+
+def lambda_handler(event, context):
+    """Détection credential stuffing"""
+    source_ip = event['requestContext']['identity']['sourceIp']
+    current_time = datetime.utcnow()
+
+    # Compter les tentatives depuis cette IP dans les 5 dernières minutes
+    response = table.query(
+        KeyConditionExpression='SourceIP = :ip AND Timestamp > :time',
+        ExpressionAttributeValues={
+            ':ip': source_ip,
+            ':time': (current_time - timedelta(minutes=5)).isoformat()
+        }
+    )
+
+    attempts = response['Count']
+
+    if attempts > 10:
+        # Bloquer temporairement cette IP
+        return {
+            'principalId': 'blocked',
+            'policyDocument': {
+                'Version': '2012-10-17',
+                'Statement': [{
+                    'Action': 'execute-api:Invoke',
+                    'Effect': 'Deny',
+                    'Resource': event['methodArn']
+                }]
+            },
+            'context': {
+                'reason': 'Too many login attempts'
+            }
+        }
+
+    # Logger la tentative
+    table.put_item(Item={
+        'SourceIP': source_ip,
+        'Timestamp': current_time.isoformat(),
+        'UserAgent': event['requestContext']['identity']['userAgent']
+    })
+
+    # Continuer avec l'authentification normale
+    return validate_credentials(event)
+```
+
+**WAF Rule pour Credential Stuffing:**
+
+```json
+{
+  "Name": "CredentialStuffingProtection",
+  "Priority": 2,
+  "Statement": {
+    "RateBasedStatement": {
+      "Limit": 100,
+      "AggregateKeyType": "IP",
+      "ScopeDownStatement": {
+        "ByteMatchStatement": {
+          "SearchString": "/auth/login",
+          "FieldToMatch": {
+            "UriPath": {}
+          },
+          "TextTransformations": [{
+            "Priority": 0,
+            "Type": "LOWERCASE"
+          }],
+          "PositionalConstraint": "CONTAINS"
+        }
+      }
+    }
+  },
+  "Action": {
+    "Block": {
+      "CustomResponse": {
+        "ResponseCode": 429,
+        "CustomResponseBodyKey": "TooManyRequests"
+      }
+    }
+  }
+}
+```
+
+### Scénario 4: DynamoDB Data Exfiltration
+
+**Contexte:**
+Un utilisateur compromis tente d'exfiltrer toutes les données de la table.
+
+**Attack:**
+
+```python
+# L'attaquant effectue un scan complet
+import boto3
+
+dynamodb = boto3.resource('dynamodb')
+table = dynamodb.Table('UserData')
+
+# Scan all items (inefficient but bypasses query restrictions)
+response = table.scan()
+items = response['Items']
+
+# Continuer avec pagination
+while 'LastEvaluatedKey' in response:
+    response = table.scan(ExclusiveStartKey=response['LastEvaluatedKey'])
+    items.extend(response['Items'])
+
+# Exfiltrer les données
+with open('exfiltrated_data.json', 'w') as f:
+    json.dump(items, f)
+```
+
+**Prévention:**
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "PreventFullTableScans",
+      "Effect": "Deny",
+      "Action": "dynamodb:Scan",
+      "Resource": "arn:aws:dynamodb:us-east-1:123456789012:table/UserData",
+      "Condition": {
+        "StringNotEquals": {
+          "aws:userid": "ADMIN_USER_ID"
+        }
+      }
+    }
+  ]
+}
+```
+
+**Détection CloudWatch:**
+
+```sql
+# Détecter les scans complets de tables
+fields @timestamp, userIdentity.arn, requestParameters.tableName, responseElements.scannedCount
+| filter eventName = "Scan"
+| filter responseElements.scannedCount > 1000
+| stats sum(responseElements.scannedCount) as totalScanned by userIdentity.arn, requestParameters.tableName, bin(5m)
+| sort totalScanned desc
+```
+
+**Alarme CloudWatch:**
+
+```bash
+aws logs put-metric-filter \
+    --log-group-name /aws/cloudtrail/logs \
+    --filter-name DynamoDB-Large-Scans \
+    --filter-pattern '{($.eventName = Scan) && ($.responseElements.scannedCount > 5000)}' \
+    --metric-transformations \
+        metricName=DynamoDBLargeScans,metricNamespace=SecurityMetrics,metricValue=1
+
+aws cloudwatch put-metric-alarm \
+    --alarm-name DynamoDB-Exfiltration-Detected \
+    --alarm-description "Large DynamoDB scan detected" \
+    --metric-name DynamoDBLargeScans \
+    --namespace SecurityMetrics \
+    --statistic Sum \
+    --period 300 \
+    --evaluation-periods 1 \
+    --threshold 3 \
+    --comparison-operator GreaterThanThreshold \
+    --alarm-actions arn:aws:sns:us-east-1:123456789012:SecurityAlerts
+```
+
+---
+
+## Architectures Complètes (Terraform)
+
+### 1. Multi-Tenant S3 avec Access Points
+
+```hcl
+# s3_multi_tenant.tf
+resource "aws_kms_key" "s3_tenant_data" {
+  description             = "KMS key for multi-tenant S3 data"
+  deletion_window_in_days = 30
+  enable_key_rotation     = true
+
+  tags = {
+    Name        = "s3-tenant-data-key"
+    Environment = "production"
+  }
+}
+
+resource "aws_s3_bucket" "multi_tenant_data" {
+  bucket = "my-saas-multi-tenant-data"
+
+  tags = {
+    Name        = "Multi-Tenant Data Bucket"
+    Environment = "production"
+  }
+}
+
+resource "aws_s3_bucket_versioning" "multi_tenant_data" {
+  bucket = aws_s3_bucket.multi_tenant_data.id
+
+  versioning_configuration {
+    status     = "Enabled"
+    mfa_delete = "Disabled"  # Enable with root account + MFA
+  }
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "multi_tenant_data" {
+  bucket = aws_s3_bucket.multi_tenant_data.id
+
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm     = "aws:kms"
+      kms_master_key_id = aws_kms_key.s3_tenant_data.arn
+    }
+    bucket_key_enabled = true
+  }
+}
+
+resource "aws_s3_bucket_public_access_block" "multi_tenant_data" {
+  bucket = aws_s3_bucket.multi_tenant_data.id
+
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+resource "aws_s3_bucket_policy" "multi_tenant_data" {
+  bucket = aws_s3_bucket.multi_tenant_data.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "DenyInsecureTransport"
+        Effect = "Deny"
+        Principal = "*"
+        Action = "s3:*"
+        Resource = [
+          aws_s3_bucket.multi_tenant_data.arn,
+          "${aws_s3_bucket.multi_tenant_data.arn}/*"
+        ]
+        Condition = {
+          Bool = {
+            "aws:SecureTransport" = "false"
+          }
+        }
+      },
+      {
+        Sid    = "DenyUnencryptedObjectUploads"
+        Effect = "Deny"
+        Principal = "*"
+        Action = "s3:PutObject"
+        Resource = "${aws_s3_bucket.multi_tenant_data.arn}/*"
+        Condition = {
+          StringNotEquals = {
+            "s3:x-amz-server-side-encryption" = "aws:kms"
+          }
+        }
+      }
+    ]
+  })
+}
+
+# S3 Access Point per Tenant
+resource "aws_s3_access_point" "tenant_a" {
+  bucket = aws_s3_bucket.multi_tenant_data.id
+  name   = "tenant-a-access-point"
+
+  vpc_configuration {
+    vpc_id = aws_vpc.main.id
+  }
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Principal = {
+        AWS = aws_iam_role.tenant_a_role.arn
+      }
+      Action = [
+        "s3:GetObject",
+        "s3:PutObject",
+        "s3:DeleteObject"
+      ]
+      Resource = "arn:aws:s3:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:accesspoint/tenant-a-access-point/object/tenant-a/*"
+    }]
+  })
+}
+
+resource "aws_s3_access_point" "tenant_b" {
+  bucket = aws_s3_bucket.multi_tenant_data.id
+  name   = "tenant-b-access-point"
+
+  vpc_configuration {
+    vpc_id = aws_vpc.main.id
+  }
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Principal = {
+        AWS = aws_iam_role.tenant_b_role.arn
+      }
+      Action = [
+        "s3:GetObject",
+        "s3:PutObject",
+        "s3:DeleteObject"
+      ]
+      Resource = "arn:aws:s3:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:accesspoint/tenant-b-access-point/object/tenant-b/*"
+    }]
+  })
+}
+
+# S3 Object Lambda for data masking
+resource "aws_s3_object_lambda_access_point" "data_masking" {
+  name = "data-masking-access-point"
+
+  configuration {
+    supporting_access_point = aws_s3_access_point.tenant_a.arn
+
+    transformation_configuration {
+      actions = ["GetObject"]
+
+      content_transformation {
+        aws_lambda {
+          function_arn = aws_lambda_function.data_masking.arn
+        }
+      }
+    }
+  }
+}
+
+resource "aws_lambda_function" "data_masking" {
+  filename         = "data_masking.zip"
+  function_name    = "s3-object-lambda-data-masking"
+  role             = aws_iam_role.object_lambda_role.arn
+  handler          = "index.handler"
+  source_code_hash = filebase64sha256("data_masking.zip")
+  runtime          = "python3.11"
+
+  environment {
+    variables = {
+      MASK_FIELDS = "ssn,credit_card,email"
+    }
+  }
+}
+
+# S3 Lifecycle Rules
+resource "aws_s3_bucket_lifecycle_configuration" "multi_tenant_data" {
+  bucket = aws_s3_bucket.multi_tenant_data.id
+
+  rule {
+    id     = "transition-to-ia"
+    status = "Enabled"
+
+    filter {
+      prefix = "tenant-*/"
+    }
+
+    transition {
+      days          = 30
+      storage_class = "STANDARD_IA"
+    }
+
+    transition {
+      days          = 90
+      storage_class = "GLACIER_IR"
+    }
+
+    transition {
+      days          = 180
+      storage_class = "DEEP_ARCHIVE"
+    }
+  }
+
+  rule {
+    id     = "expire-old-versions"
+    status = "Enabled"
+
+    noncurrent_version_expiration {
+      noncurrent_days = 90
+    }
+
+    noncurrent_version_transition {
+      noncurrent_days = 30
+      storage_class   = "STANDARD_IA"
+    }
+  }
+
+  rule {
+    id     = "delete-incomplete-multipart-uploads"
+    status = "Enabled"
+
+    abort_incomplete_multipart_upload {
+      days_after_initiation = 7
+    }
+  }
+}
+
+# S3 Event Notifications
+resource "aws_s3_bucket_notification" "multi_tenant_data" {
+  bucket = aws_s3_bucket.multi_tenant_data.id
+
+  lambda_function {
+    lambda_function_arn = aws_lambda_function.s3_security_audit.arn
+    events              = ["s3:ObjectCreated:*", "s3:ObjectRemoved:*"]
+    filter_prefix       = "tenant-"
+  }
+
+  lambda_function {
+    lambda_function_arn = aws_lambda_function.malware_scanner.arn
+    events              = ["s3:ObjectCreated:Put", "s3:ObjectCreated:Post"]
+    filter_suffix       = ".exe"
+  }
+}
+
+resource "aws_lambda_permission" "allow_s3_security_audit" {
+  statement_id  = "AllowS3Invoke"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.s3_security_audit.function_name
+  principal     = "s3.amazonaws.com"
+  source_arn    = aws_s3_bucket.multi_tenant_data.arn
+}
+```
+
+### 2. RDS Production Setup avec Read Replicas
+
+```hcl
+# rds_production.tf
+resource "aws_kms_key" "rds" {
+  description             = "KMS key for RDS encryption"
+  deletion_window_in_days = 30
+  enable_key_rotation     = true
+
+  tags = {
+    Name = "rds-encryption-key"
+  }
+}
+
+resource "aws_db_subnet_group" "private_db" {
+  name       = "private-db-subnet-group"
+  subnet_ids = [
+    aws_subnet.private_db_1.id,
+    aws_subnet.private_db_2.id,
+    aws_subnet.private_db_3.id
+  ]
+
+  tags = {
+    Name = "Private DB Subnet Group"
+  }
+}
+
+resource "aws_db_parameter_group" "postgres_secure" {
+  name   = "postgres-secure-params"
+  family = "postgres15"
+
+  parameter {
+    name  = "ssl"
+    value = "1"
+  }
+
+  parameter {
+    name  = "ssl_min_protocol_version"
+    value = "TLSv1.2"
+  }
+
+  parameter {
+    name  = "log_connections"
+    value = "1"
+  }
+
+  parameter {
+    name  = "log_disconnections"
+    value = "1"
+  }
+
+  parameter {
+    name  = "log_duration"
+    value = "1"
+  }
+
+  parameter {
+    name  = "log_statement"
+    value = "ddl"
+  }
+
+  parameter {
+    name  = "rds.force_ssl"
+    value = "1"
+  }
+
+  tags = {
+    Name = "PostgreSQL Secure Parameters"
+  }
+}
+
+resource "aws_db_instance" "primary" {
+  identifier     = "prod-postgresql-primary"
+  engine         = "postgres"
+  engine_version = "15.4"
+  instance_class = "db.r6g.2xlarge"
+
+  allocated_storage     = 500
+  max_allocated_storage = 2000
+  storage_type          = "gp3"
+  storage_encrypted     = true
+  kms_key_id            = aws_kms_key.rds.arn
+
+  db_name  = "production"
+  username = "dbadmin"
+  # Password should be managed via Secrets Manager
+  manage_master_user_password = true
+
+  db_subnet_group_name   = aws_db_subnet_group.private_db.name
+  vpc_security_group_ids = [aws_security_group.rds.id]
+  parameter_group_name   = aws_db_parameter_group.postgres_secure.name
+
+  multi_az               = true
+  publicly_accessible    = false
+  deletion_protection    = true
+  skip_final_snapshot    = false
+  final_snapshot_identifier = "prod-postgresql-final-snapshot-${formatdate("YYYY-MM-DD-hhmm", timestamp())}"
+
+  backup_retention_period   = 30
+  backup_window             = "03:00-04:00"
+  maintenance_window        = "mon:04:00-mon:05:00"
+  copy_tags_to_snapshot     = true
+
+  enabled_cloudwatch_logs_exports = [
+    "postgresql",
+    "upgrade"
+  ]
+
+  performance_insights_enabled    = true
+  performance_insights_kms_key_id = aws_kms_key.rds.arn
+  performance_insights_retention_period = 7
+
+  monitoring_interval = 60
+  monitoring_role_arn = aws_iam_role.rds_monitoring.arn
+
+  tags = {
+    Name        = "Production PostgreSQL Primary"
+    Environment = "production"
+    Backup      = "required"
+  }
+}
+
+# Read Replica 1
+resource "aws_db_instance" "read_replica_1" {
+  identifier     = "prod-postgresql-read-replica-1"
+  replicate_source_db = aws_db_instance.primary.identifier
+  instance_class = "db.r6g.xlarge"
+
+  publicly_accessible = false
+  skip_final_snapshot = true
+
+  performance_insights_enabled = true
+  performance_insights_kms_key_id = aws_kms_key.rds.arn
+
+  monitoring_interval = 60
+  monitoring_role_arn = aws_iam_role.rds_monitoring.arn
+
+  tags = {
+    Name        = "Production PostgreSQL Read Replica 1"
+    Environment = "production"
+    Role        = "read-replica"
+  }
+}
+
+# Read Replica 2 (autre AZ)
+resource "aws_db_instance" "read_replica_2" {
+  identifier          = "prod-postgresql-read-replica-2"
+  replicate_source_db = aws_db_instance.primary.identifier
+  instance_class      = "db.r6g.xlarge"
+
+  availability_zone   = "us-east-1c"
+  publicly_accessible = false
+  skip_final_snapshot = true
+
+  performance_insights_enabled    = true
+  performance_insights_kms_key_id = aws_kms_key.rds.arn
+
+  monitoring_interval = 60
+  monitoring_role_arn = aws_iam_role.rds_monitoring.arn
+
+  tags = {
+    Name        = "Production PostgreSQL Read Replica 2"
+    Environment = "production"
+    Role        = "read-replica"
+  }
+}
+
+# RDS Proxy for connection pooling
+resource "aws_db_proxy" "main" {
+  name                   = "prod-postgresql-proxy"
+  engine_family          = "POSTGRESQL"
+  auth {
+    auth_scheme = "SECRETS"
+    iam_auth    = "REQUIRED"
+    secret_arn  = aws_secretsmanager_secret.db_credentials.arn
+  }
+
+  role_arn               = aws_iam_role.rds_proxy.arn
+  vpc_subnet_ids         = [
+    aws_subnet.private_db_1.id,
+    aws_subnet.private_db_2.id
+  ]
+
+  require_tls = true
+
+  tags = {
+    Name = "Production RDS Proxy"
+  }
+}
+
+resource "aws_db_proxy_default_target_group" "main" {
+  db_proxy_name = aws_db_proxy.main.name
+
+  connection_pool_config {
+    connection_borrow_timeout    = 120
+    max_connections_percent      = 100
+    max_idle_connections_percent = 50
+  }
+}
+
+resource "aws_db_proxy_target" "primary" {
+  db_proxy_name          = aws_db_proxy.main.name
+  target_group_name      = aws_db_proxy_default_target_group.main.name
+  db_instance_identifier = aws_db_instance.primary.identifier
+}
+
+# CloudWatch Alarms for RDS
+resource "aws_cloudwatch_metric_alarm" "rds_cpu" {
+  alarm_name          = "rds-primary-high-cpu"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 2
+  metric_name         = "CPUUtilization"
+  namespace           = "AWS/RDS"
+  period              = 300
+  statistic           = "Average"
+  threshold           = 80
+
+  dimensions = {
+    DBInstanceIdentifier = aws_db_instance.primary.identifier
+  }
+
+  alarm_actions = [aws_sns_topic.rds_alerts.arn]
+}
+
+resource "aws_cloudwatch_metric_alarm" "rds_storage" {
+  alarm_name          = "rds-primary-low-storage"
+  comparison_operator = "LessThanThreshold"
+  evaluation_periods  = 1
+  metric_name         = "FreeStorageSpace"
+  namespace           = "AWS/RDS"
+  period              = 300
+  statistic           = "Average"
+  threshold           = 10737418240  # 10 GB
+
+  dimensions = {
+    DBInstanceIdentifier = aws_db_instance.primary.identifier
+  }
+
+  alarm_actions = [aws_sns_topic.rds_alerts.arn]
+}
+
+resource "aws_cloudwatch_metric_alarm" "rds_connections" {
+  alarm_name          = "rds-primary-high-connections"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 2
+  metric_name         = "DatabaseConnections"
+  namespace           = "AWS/RDS"
+  period              = 300
+  statistic           = "Average"
+  threshold           = 200
+
+  dimensions = {
+    DBInstanceIdentifier = aws_db_instance.primary.identifier
+  }
+
+  alarm_actions = [aws_sns_topic.rds_alerts.arn]
+}
+```
+
+### 3. API Gateway Multi-Couches de Sécurité
+
+```hcl
+# api_gateway_secure.tf
+resource "aws_apigatewayv2_api" "main" {
+  name          = "secure-saas-api"
+  protocol_type = "HTTP"
+
+  cors_configuration {
+    allow_origins = ["https://app.example.com"]
+    allow_methods = ["GET", "POST", "PUT", "DELETE", "OPTIONS"]
+    allow_headers = ["Content-Type", "Authorization", "X-Tenant-ID"]
+    max_age       = 3600
+  }
+
+  tags = {
+    Name        = "Secure SaaS API"
+    Environment = "production"
+  }
+}
+
+# Custom Domain with ACM Certificate
+resource "aws_apigatewayv2_domain_name" "main" {
+  domain_name = "api.example.com"
+
+  domain_name_configuration {
+    certificate_arn = aws_acm_certificate.api.arn
+    endpoint_type   = "REGIONAL"
+    security_policy = "TLS_1_2"
+  }
+}
+
+resource "aws_apigatewayv2_api_mapping" "main" {
+  api_id      = aws_apigatewayv2_api.main.id
+  domain_name = aws_apigatewayv2_domain_name.main.id
+  stage       = aws_apigatewayv2_stage.prod.id
+}
+
+# WAF Web ACL
+resource "aws_wafv2_web_acl" "api_gateway" {
+  name  = "api-gateway-waf"
+  scope = "REGIONAL"
+
+  default_action {
+    allow {}
+  }
+
+  # Rule 1: Rate Limiting
+  rule {
+    name     = "RateLimitRule"
+    priority = 1
+
+    action {
+      block {
+        custom_response {
+          response_code = 429
+        }
+      }
+    }
+
+    statement {
+      rate_based_statement {
+        limit              = 2000
+        aggregate_key_type = "IP"
+      }
+    }
+
+    visibility_config {
+      cloudwatch_metrics_enabled = true
+      metric_name                = "RateLimitRule"
+      sampled_requests_enabled   = true
+    }
+  }
+
+  # Rule 2: SQL Injection Protection
+  rule {
+    name     = "SQLInjectionProtection"
+    priority = 2
+
+    override_action {
+      none {}
+    }
+
+    statement {
+      managed_rule_group_statement {
+        name        = "AWSManagedRulesSQLiRuleSet"
+        vendor_name = "AWS"
+      }
+    }
+
+    visibility_config {
+      cloudwatch_metrics_enabled = true
+      metric_name                = "SQLInjectionProtection"
+      sampled_requests_enabled   = true
+    }
+  }
+
+  # Rule 3: Known Bad Inputs
+  rule {
+    name     = "KnownBadInputsProtection"
+    priority = 3
+
+    override_action {
+      none {}
+    }
+
+    statement {
+      managed_rule_group_statement {
+        name        = "AWSManagedRulesKnownBadInputsRuleSet"
+        vendor_name = "AWS"
+      }
+    }
+
+    visibility_config {
+      cloudwatch_metrics_enabled = true
+      metric_name                = "KnownBadInputsProtection"
+      sampled_requests_enabled   = true
+    }
+  }
+
+  # Rule 4: Geographic Blocking (optional)
+  rule {
+    name     = "GeoBlockingRule"
+    priority = 4
+
+    action {
+      block {}
+    }
+
+    statement {
+      not_statement {
+        statement {
+          geo_match_statement {
+            country_codes = ["US", "CA", "GB", "FR", "DE"]
+          }
+        }
+      }
+    }
+
+    visibility_config {
+      cloudwatch_metrics_enabled = true
+      metric_name                = "GeoBlockingRule"
+      sampled_requests_enabled   = true
+    }
+  }
+
+  visibility_config {
+    cloudwatch_metrics_enabled = true
+    metric_name                = "ApiGatewayWAF"
+    sampled_requests_enabled   = true
+  }
+
+  tags = {
+    Name = "API Gateway WAF"
+  }
+}
+
+resource "aws_wafv2_web_acl_association" "api_gateway" {
+  resource_arn = aws_apigatewayv2_stage.prod.arn
+  web_acl_arn  = aws_wafv2_web_acl.api_gateway.arn
+}
+
+# Cognito User Pool
+resource "aws_cognito_user_pool" "main" {
+  name = "saas-user-pool"
+
+  password_policy {
+    minimum_length    = 12
+    require_lowercase = true
+    require_uppercase = true
+    require_numbers   = true
+    require_symbols   = true
+  }
+
+  mfa_configuration = "OPTIONAL"
+
+  software_token_mfa_configuration {
+    enabled = true
+  }
+
+  account_recovery_setting {
+    recovery_mechanism {
+      name     = "verified_email"
+      priority = 1
+    }
+  }
+
+  user_attribute_update_settings {
+    attributes_require_verification_before_update = ["email"]
+  }
+
+  schema {
+    name                = "tenant_id"
+    attribute_data_type = "String"
+    mutable             = false
+    required            = true
+
+    string_attribute_constraints {
+      min_length = 1
+      max_length = 256
+    }
+  }
+
+  tags = {
+    Name = "SaaS User Pool"
+  }
+}
+
+resource "aws_cognito_user_pool_client" "main" {
+  name         = "saas-app-client"
+  user_pool_id = aws_cognito_user_pool.main.id
+
+  explicit_auth_flows = [
+    "ALLOW_USER_SRP_AUTH",
+    "ALLOW_REFRESH_TOKEN_AUTH"
+  ]
+
+  prevent_user_existence_errors = "ENABLED"
+
+  access_token_validity  = 1  # 1 hour
+  id_token_validity      = 1  # 1 hour
+  refresh_token_validity = 30 # 30 days
+
+  token_validity_units {
+    access_token  = "hours"
+    id_token      = "hours"
+    refresh_token = "days"
+  }
+}
+
+# Cognito Authorizer
+resource "aws_apigatewayv2_authorizer" "cognito" {
+  api_id           = aws_apigatewayv2_api.main.id
+  authorizer_type  = "JWT"
+  identity_sources = ["$request.header.Authorization"]
+  name             = "cognito-authorizer"
+
+  jwt_configuration {
+    audience = [aws_cognito_user_pool_client.main.id]
+    issuer   = "https://${aws_cognito_user_pool.main.endpoint}"
+  }
+}
+
+# API Gateway Stage
+resource "aws_apigatewayv2_stage" "prod" {
+  api_id      = aws_apigatewayv2_api.main.id
+  name        = "prod"
+  auto_deploy = true
+
+  access_log_settings {
+    destination_arn = aws_cloudwatch_log_group.api_gateway.arn
+    format = jsonencode({
+      requestId      = "$context.requestId"
+      ip             = "$context.identity.sourceIp"
+      requestTime    = "$context.requestTime"
+      httpMethod     = "$context.httpMethod"
+      routeKey       = "$context.routeKey"
+      status         = "$context.status"
+      protocol       = "$context.protocol"
+      responseLength = "$context.responseLength"
+      errorMessage   = "$context.error.message"
+      authorizerError = "$context.authorizer.error"
+    })
+  }
+
+  default_route_settings {
+    throttling_burst_limit = 5000
+    throttling_rate_limit  = 10000
+  }
+
+  tags = {
+    Name        = "Production Stage"
+    Environment = "production"
+  }
+}
+
+resource "aws_cloudwatch_log_group" "api_gateway" {
+  name              = "/aws/apigateway/${aws_apigatewayv2_api.main.name}"
+  retention_in_days = 30
+  kms_key_id        = aws_kms_key.cloudwatch_logs.arn
+}
+
+# Lambda Integration with Authorizer
+resource "aws_apigatewayv2_route" "get_users" {
+  api_id    = aws_apigatewayv2_api.main.id
+  route_key = "GET /users"
+
+  authorization_type = "JWT"
+  authorizer_id      = aws_apigatewayv2_authorizer.cognito.id
+  target             = "integrations/${aws_apigatewayv2_integration.get_users.id}"
+}
+
+resource "aws_apigatewayv2_integration" "get_users" {
+  api_id           = aws_apigatewayv2_api.main.id
+  integration_type = "AWS_PROXY"
+
+  integration_uri    = aws_lambda_function.get_users.arn
+  integration_method = "POST"
+}
+
+# Usage Plan and API Keys
+resource "aws_api_gateway_usage_plan" "standard" {
+  name = "standard-usage-plan"
+
+  api_stages {
+    api_id = aws_apigatewayv2_api.main.id
+    stage  = aws_apigatewayv2_stage.prod.name
+  }
+
+  quota_settings {
+    limit  = 100000
+    period = "DAY"
+  }
+
+  throttle_settings {
+    burst_limit = 500
+    rate_limit  = 1000
+  }
+}
+```
+
+---
+
 ## Bonnes Pratiques Multi-Services
 
 ### 1. Defense-in-Depth
