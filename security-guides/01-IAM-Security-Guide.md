@@ -2033,6 +2033,760 @@ fields @timestamp, userIdentity.accountId, userIdentity.arn, eventName, requestP
 
 ---
 
+## IAM Permission Boundaries
+
+### Concept et Cas d'Usage
+
+Les **Permission Boundaries** limitent les permissions maximales qu'une entité IAM peut avoir, même si des politiques plus permissives sont attachées.
+
+**Use Case Principal:** Déléguer la création de rôles IAM sans risque d'escalade de privilèges.
+
+```
+Sans Permission Boundary:
+Developer crée un rôle → Attache AdministratorAccess → Escalade de privilèges ⚠️
+
+Avec Permission Boundary:
+Developer crée un rôle → Tente d'attacher AdministratorAccess → Boundary limite à DeveloperAccess ✅
+```
+
+### Implémentation Terraform
+
+```hcl
+# permission_boundaries.tf
+
+# 1. Créer la politique de boundary
+resource "aws_iam_policy" "developer_boundary" {
+  name        = "DeveloperPermissionBoundary"
+  description = "Maximum permissions for developer-created roles"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "AllowedServices"
+        Effect = "Allow"
+        Action = [
+          "ec2:*",
+          "s3:*",
+          "dynamodb:*",
+          "lambda:*",
+          "logs:*",
+          "cloudwatch:*",
+          "apigateway:*"
+        ]
+        Resource = "*"
+      },
+      {
+        Sid    = "DenyAdminActions"
+        Effect = "Deny"
+        Action = [
+          "iam:*",
+          "organizations:*",
+          "account:*",
+          "kms:ScheduleKeyDeletion",
+          "kms:Delete*"
+        ]
+        Resource = "*"
+      },
+      {
+        Sid    = "AllowIAMReadOnly"
+        Effect = "Allow"
+        Action = [
+          "iam:Get*",
+          "iam:List*"
+        ]
+        Resource = "*"
+      }
+    ]
+  })
+}
+
+# 2. Politique permettant aux développeurs de créer des rôles
+resource "aws_iam_policy" "allow_role_creation_with_boundary" {
+  name = "AllowRoleCreationWithBoundary"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "AllowRoleCreation"
+        Effect = "Allow"
+        Action = [
+          "iam:CreateRole",
+          "iam:AttachRolePolicy",
+          "iam:DetachRolePolicy",
+          "iam:PutRolePolicy",
+          "iam:DeleteRolePolicy"
+        ]
+        Resource = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/developer/*"
+        Condition = {
+          StringEquals = {
+            "iam:PermissionsBoundary" = aws_iam_policy.developer_boundary.arn
+          }
+        }
+      },
+      {
+        Sid    = "RequirePermissionsBoundary"
+        Effect = "Deny"
+        Action = [
+          "iam:CreateRole",
+          "iam:PutRolePermissionsBoundary"
+        ]
+        Resource = "*"
+        Condition = {
+          StringNotEquals = {
+            "iam:PermissionsBoundary" = aws_iam_policy.developer_boundary.arn
+          }
+        }
+      },
+      {
+        Sid    = "PreventBoundaryRemoval"
+        Effect = "Deny"
+        Action = "iam:DeleteRolePermissionsBoundary"
+        Resource = "*"
+      }
+    ]
+  })
+}
+
+# 3. Rôle développeur avec boundary
+resource "aws_iam_role" "developer" {
+  name                 = "DeveloperRole"
+  permissions_boundary = aws_iam_policy.developer_boundary.arn
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Principal = {
+        AWS = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:root"
+      }
+      Action = "sts:AssumeRole"
+      Condition = {
+        StringEquals = {
+          "sts:ExternalId" = var.developer_external_id
+        }
+      }
+    }]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "developer_create_roles" {
+  role       = aws_iam_role.developer.name
+  policy_arn = aws_iam_policy.allow_role_creation_with_boundary.arn
+}
+```
+
+### Validation et Testing
+
+```python
+# Test script pour valider la permission boundary
+import boto3
+
+iam = boto3.client('iam')
+
+def test_permission_boundary():
+    """Tester que la boundary empêche l'escalade de privilèges"""
+
+    # Test 1: Créer un rôle sans boundary (devrait échouer)
+    try:
+        iam.create_role(
+            RoleName='test-role-no-boundary',
+            AssumeRolePolicyDocument='...'
+        )
+        print("❌ FAIL: Role created without boundary")
+    except Exception as e:
+        print("✅ PASS: Boundary enforcement working")
+
+    # Test 2: Créer un rôle avec boundary (devrait réussir)
+    try:
+        iam.create_role(
+            RoleName='test-role-with-boundary',
+            AssumeRolePolicyDocument='...',
+            PermissionsBoundary='arn:aws:iam::123456789012:policy/DeveloperPermissionBoundary'
+        )
+        print("✅ PASS: Role created with boundary")
+    except Exception as e:
+        print(f"❌ FAIL: {e}")
+
+    # Test 3: Tenter d'attacher AdministratorAccess (devrait être limité par boundary)
+    try:
+        iam.attach_role_policy(
+            RoleName='test-role-with-boundary',
+            PolicyArn='arn:aws:iam::aws:policy/AdministratorAccess'
+        )
+        # Même si attaché, les permissions effectives sont limitées par la boundary
+        print("⚠️ Policy attached but limited by boundary")
+    except Exception as e:
+        print(f"Info: {e}")
+```
+
+---
+
+## Break Glass Procedures (Accès d'Urgence)
+
+### Architecture Break Glass
+
+Les procédures "Break Glass" permettent un accès d'urgence en cas d'incident majeur tout en maintenant l'audit et la sécurité.
+
+```
+Situation Normale:
+┌─────────────────┐
+│ Users → Roles   │
+│ with MFA        │
+└─────────────────┘
+
+Situation d'Urgence (Break Glass):
+┌─────────────────────────────────┐
+│ 1. Récupérer credentials depuis │
+│    sealed envelope physique      │
+│ 2. Utiliser token MFA hardware  │
+│ 3. AssumeRole vers BreakGlass   │
+│ 4. Toutes actions loggées       │
+│ 5. Alertes immédiates envoyées  │
+└─────────────────────────────────┘
+```
+
+### Implémentation Complète
+
+```hcl
+# break_glass.tf
+
+# 1. Break Glass Role
+resource "aws_iam_role" "break_glass" {
+  name        = "BreakGlassEmergencyAccess"
+  description = "Emergency access role - Use only in critical incidents"
+
+  max_session_duration = 3600  # 1 heure maximum
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Principal = {
+        AWS = [
+          "arn:aws:iam::${data.aws_caller_identity.current.account_id}:user/break-glass-user-1",
+          "arn:aws:iam::${data.aws_caller_identity.current.account_id}:user/break-glass-user-2"
+        ]
+      }
+      Action = "sts:AssumeRole"
+      Condition = {
+        Bool = {
+          "aws:MultiFactorAuthPresent" = "true"
+        }
+        IpAddress = {
+          "aws:SourceIp" = var.emergency_ip_ranges  # IPs autorisées
+        }
+      }
+    }]
+  })
+
+  tags = {
+    Name     = "Break Glass Emergency Access"
+    Critical = "true"
+  }
+}
+
+resource "aws_iam_role_policy_attachment" "break_glass_admin" {
+  role       = aws_iam_role.break_glass.name
+  policy_arn = "arn:aws:iam::aws:policy/AdministratorAccess"
+}
+
+# 2. CloudWatch Alarm pour utilisation Break Glass
+resource "aws_cloudwatch_log_metric_filter" "break_glass_usage" {
+  name           = "break-glass-role-usage"
+  log_group_name = "/aws/cloudtrail/organization"
+
+  pattern = "{($.userIdentity.sessionContext.sessionIssuer.userName = \"BreakGlassEmergencyAccess\")}"
+
+  metric_transformation {
+    name      = "BreakGlassRoleUsage"
+    namespace = "Security/BreakGlass"
+    value     = "1"
+  }
+}
+
+resource "aws_cloudwatch_metric_alarm" "break_glass_alert" {
+  alarm_name          = "CRITICAL-BreakGlass-Role-Used"
+  alarm_description   = "Break Glass emergency role has been used!"
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  evaluation_periods  = 1
+  metric_name         = "BreakGlassRoleUsage"
+  namespace           = "Security/BreakGlass"
+  period              = 60
+  statistic           = "Sum"
+  threshold           = 1
+  treat_missing_data  = "notBreaching"
+
+  alarm_actions = [
+    aws_sns_topic.critical_security_alerts.arn,
+    aws_sns_topic.exec_team_sms.arn  # SMS au CISO et CEO
+  ]
+}
+
+# 3. Lambda pour notification enrichie
+resource "aws_lambda_function" "break_glass_notifier" {
+  filename         = "break_glass_notifier.zip"
+  function_name    = "break-glass-emergency-notifier"
+  role             = aws_iam_role.break_glass_notifier.arn
+  handler          = "index.handler"
+  runtime          = "python3.11"
+  source_code_hash = filebase64sha256("break_glass_notifier.zip")
+
+  environment {
+    variables = {
+      SLACK_WEBHOOK_URL = var.slack_security_webhook
+      PAGERDUTY_KEY     = var.pagerduty_api_key
+    }
+  }
+}
+```
+
+### Lambda de Notification Break Glass
+
+```python
+# break_glass_notifier/index.py
+import boto3
+import json
+import requests
+import os
+from datetime import datetime
+
+def handler(event, context):
+    """Notifier l'équipe en cas d'utilisation du Break Glass"""
+
+    # Parser l'événement CloudTrail
+    message = json.loads(event['Records'][0]['Sns']['Message'])
+
+    cloudtrail = boto3.client('cloudtrail')
+
+    # Récupérer les détails de l'événement
+    events = cloudtrail.lookup_events(
+        LookupAttributes=[{
+            'AttributeKey': 'Username',
+            'AttributeValue': 'BreakGlassEmergencyAccess'
+        }],
+        MaxResults=10
+    )
+
+    for evt in events['Events']:
+        event_detail = json.loads(evt['CloudTrailEvent'])
+
+        notification = {
+            'timestamp': datetime.now().isoformat(),
+            'severity': 'CRITICAL',
+            'event': 'BREAK_GLASS_ACTIVATED',
+            'user': event_detail.get('userIdentity', {}).get('principalId'),
+            'source_ip': event_detail.get('sourceIPAddress'),
+            'user_agent': event_detail.get('userAgent'),
+            'event_name': event_detail.get('eventName'),
+            'aws_region': event_detail.get('awsRegion'),
+            'actions_taken': []
+        }
+
+        # Notifier via Slack
+        send_slack_alert(notification)
+
+        # Créer un incident PagerDuty
+        create_pagerduty_incident(notification)
+
+        # Logger dans S3 pour forensics
+        log_to_forensics_bucket(notification)
+
+        # Envoyer SMS aux executives
+        send_executive_sms(notification)
+
+    return {'statusCode': 200}
+
+def send_slack_alert(notification):
+    """Envoyer une alerte Slack"""
+    webhook_url = os.environ['SLACK_WEBHOOK_URL']
+
+    message = {
+        'text': '🚨 CRITICAL: Break Glass Access Used',
+        'attachments': [{
+            'color': 'danger',
+            'fields': [
+                {'title': 'User', 'value': notification['user'], 'short': True},
+                {'title': 'Source IP', 'value': notification['source_ip'], 'short': True},
+                {'title': 'Region', 'value': notification['aws_region'], 'short': True},
+                {'title': 'Time', 'value': notification['timestamp'], 'short': True}
+            ]
+        }]
+    }
+
+    requests.post(webhook_url, json=message)
+
+def create_pagerduty_incident(notification):
+    """Créer un incident PagerDuty de haute priorité"""
+    api_key = os.environ['PAGERDUTY_KEY']
+
+    incident = {
+        'incident': {
+            'type': 'incident',
+            'title': '🚨 Break Glass Emergency Access Used',
+            'service': {'id': 'SECURITY_SERVICE_ID', 'type': 'service_reference'},
+            'urgency': 'high',
+            'body': {
+                'type': 'incident_body',
+                'details': json.dumps(notification, indent=2)
+            }
+        }
+    }
+
+    headers = {
+        'Authorization': f'Token token={api_key}',
+        'Content-Type': 'application/json',
+        'Accept': 'application/vnd.pagerduty+json;version=2'
+    }
+
+    requests.post(
+        'https://api.pagerduty.com/incidents',
+        headers=headers,
+        json=incident
+    )
+```
+
+### Procédure Opérationnelle
+
+```markdown
+# Break Glass Emergency Access Procedure
+
+## ⚠️ À N'UTILISER QU'EN CAS D'URGENCE CRITIQUE
+
+### Situations Autorisées:
+- Compte root compromis
+- Tous les administrateurs IAM perdus/compromis
+- Incident de sécurité majeur nécessitant accès immédiat
+- Panne critique empêchant accès normal
+
+### Procédure d'Activation:
+
+1. **Obtenir Approbation**
+   - [ ] Contacter CISO (téléphone)
+   - [ ] Documenter la raison (ticket incident)
+   - [ ] Obtenir approbation verbale + écrite
+
+2. **Récupérer Credentials**
+   - [ ] Ouvrir l'enveloppe scellée (coffre-fort physique)
+   - [ ] Vérifier numéro de série de l'enveloppe
+   - [ ] Credentials: break-glass-user-1 ou break-glass-user-2
+
+3. **Activer MFA Hardware**
+   - [ ] Récupérer token MFA physique (coffre-fort)
+   - [ ] Vérifier que le token est fonctionnel
+
+4. **Connexion**
+   ```bash
+   aws configure --profile break-glass
+   # Enter Access Key ID: [FROM ENVELOPE]
+   # Enter Secret Access Key: [FROM ENVELOPE]
+
+   # AssumeRole avec MFA
+   aws sts assume-role \
+       --role-arn arn:aws:iam::123456789012:role/BreakGlassEmergencyAccess \
+       --role-session-name "emergency-$(date +%Y%m%d-%H%M%S)" \
+       --serial-number arn:aws:iam::123456789012:mfa/break-glass-mfa \
+       --token-code [6-DIGIT-CODE] \
+       --profile break-glass
+   ```
+
+5. **Actions d'Urgence**
+   - [ ] Documenter CHAQUE action effectuée
+   - [ ] Résoudre l'incident
+   - [ ] Temps limite: 1 heure
+
+6. **Post-Incident (OBLIGATOIRE)**
+   - [ ] Rotation des credentials break-glass
+   - [ ] Nouvelle enveloppe scellée
+   - [ ] Rapport d'incident complet
+   - [ ] Revue avec CISO
+
+### Alertes Déclenchées:
+✅ SMS au CISO et CEO
+✅ Incident PagerDuty haute priorité
+✅ Message Slack #security-critical
+✅ Email à l'équipe executive
+✅ Logs forensics dans S3
+
+### Post-Mortem Requis:
+- Analyse de la nécessité du break glass
+- Actions effectuées pendant l'accès
+- Recommandations pour éviter future utilisation
+```
+
+---
+
+## Just-in-Time (JIT) Access
+
+### Architecture JIT
+
+Le JIT Access permet d'élever temporairement les privilèges uniquement quand nécessaire, réduisant la surface d'attaque.
+
+```
+Flux JIT Access:
+┌─────────────────────────────────────────────────┐
+│ 1. Developer demande accès production (Slack)   │
+└──────────────────┬──────────────────────────────┘
+                   │
+┌──────────────────▼──────────────────────────────┐
+│ 2. Manager approuve (dans les 15 minutes)       │
+└──────────────────┬──────────────────────────────┘
+                   │
+┌──────────────────▼──────────────────────────────┐
+│ 3. Lambda crée temporary credentials (1 heure)  │
+└──────────────────┬──────────────────────────────┘
+                   │
+┌──────────────────▼──────────────────────────────┐
+│ 4. Developer utilise credentials temporaires    │
+└──────────────────┬──────────────────────────────┘
+                   │
+┌──────────────────▼──────────────────────────────┐
+│ 5. Auto-révocation après expiration             │
+│    + Audit complet dans CloudTrail              │
+└─────────────────────────────────────────────────┘
+```
+
+### Implémentation avec Step Functions
+
+```hcl
+# jit_access.tf
+
+# DynamoDB pour tracking des accès JIT
+resource "aws_dynamodb_table" "jit_access_requests" {
+  name           = "JITAccessRequests"
+  billing_mode   = "PAY_PER_REQUEST"
+  hash_key       = "RequestId"
+  range_key      = "Timestamp"
+
+  attribute {
+    name = "RequestId"
+    type = "S"
+  }
+
+  attribute {
+    name = "Timestamp"
+    type = "N"
+  }
+
+  attribute {
+    name = "UserId"
+    type = "S"
+  }
+
+  attribute {
+    name = "Status"
+    type = "S"
+  }
+
+  global_secondary_index {
+    name            = "UserIdIndex"
+    hash_key        = "UserId"
+    range_key       = "Timestamp"
+    projection_type = "ALL"
+  }
+
+  global_secondary_index {
+    name            = "StatusIndex"
+    hash_key        = "Status"
+    range_key       = "Timestamp"
+    projection_type = "ALL"
+  }
+
+  ttl {
+    attribute_name = "ExpirationTime"
+    enabled        = true
+  }
+
+  tags = {
+    Name = "JIT Access Tracking"
+  }
+}
+
+# Step Function pour orchestration JIT
+resource "aws_sfn_state_machine" "jit_access_workflow" {
+  name     = "JITAccessWorkflow"
+  role_arn = aws_iam_role.jit_step_function.arn
+
+  definition = jsonencode({
+    Comment = "JIT Access Request Workflow"
+    StartAt = "ValidateRequest"
+    States = {
+      ValidateRequest = {
+        Type     = "Task"
+        Resource = aws_lambda_function.jit_validator.arn
+        Next     = "RequestApproval"
+        Catch = [{
+          ErrorEquals = ["ValidationError"]
+          Next        = "DenyRequest"
+        }]
+      }
+
+      RequestApproval = {
+        Type = "Task"
+        Resource = "arn:aws:states:::lambda:invoke.waitForTaskToken"
+        Parameters = {
+          FunctionName = aws_lambda_function.jit_approval_requester.arn
+          Payload = {
+            "TaskToken.$" = "$$.Task.Token"
+            "Request.$"   = "$"
+          }
+        }
+        TimeoutSeconds = 900  # 15 minutes pour approuver
+        Next           = "GrantAccess"
+        Catch = [{
+          ErrorEquals = ["States.Timeout", "ApprovalDenied"]
+          Next        = "DenyRequest"
+        }]
+      }
+
+      GrantAccess = {
+        Type     = "Task"
+        Resource = aws_lambda_function.jit_grant_access.arn
+        Next     = "WaitForExpiration"
+      }
+
+      WaitForExpiration = {
+        Type    = "Wait"
+        Seconds = 3600  # 1 heure
+        Next    = "RevokeAccess"
+      }
+
+      RevokeAccess = {
+        Type     = "Task"
+        Resource = aws_lambda_function.jit_revoke_access.arn
+        End      = true
+      }
+
+      DenyRequest = {
+        Type     = "Task"
+        Resource = aws_lambda_function.jit_deny_notifier.arn
+        End      = true
+      }
+    }
+  })
+}
+```
+
+### Lambda JIT Grant Access
+
+```python
+# jit_grant_access/index.py
+import boto3
+import json
+from datetime import datetime, timedelta
+import secrets
+
+sts = boto3.client('sts')
+iam = boto3.client('iam')
+dynamodb = boto3.resource('dynamodb')
+
+def handler(event, context):
+    """Accorder l'accès JIT temporaire"""
+
+    request_id = event['request_id']
+    user_id = event['user_id']
+    role_arn = event['requested_role_arn']
+    justification = event['justification']
+    approved_by = event['approved_by']
+
+    # Générer des credentials temporaires
+    session_name = f"jit-{user_id}-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+
+    temp_creds = sts.assume_role(
+        RoleArn=role_arn,
+        RoleSessionName=session_name,
+        DurationSeconds=3600,  # 1 heure
+        Tags=[
+            {'Key': 'JITAccess', 'Value': 'true'},
+            {'Key': 'RequestId', 'Value': request_id'},
+            {'Key': 'UserId', 'Value': user_id}
+        ]
+    )
+
+    # Stocker dans DynamoDB
+    table = dynamodb.Table('JITAccessRequests')
+    table.update_item(
+        Key={
+            'RequestId': request_id,
+            'Timestamp': event['timestamp']
+        },
+        UpdateExpression='SET #status = :status, AccessKeyId = :key, SessionToken = :token, ExpiresAt = :expires, ApprovedBy = :approver',
+        ExpressionAttributeNames={
+            '#status': 'Status'
+        },
+        ExpressionAttributeValues={
+            ':status': 'GRANTED',
+            ':key': temp_creds['Credentials']['AccessKeyId'],
+            ':token': temp_creds['Credentials']['SessionToken'],
+            ':expires': (datetime.now() + timedelta(hours=1)).isoformat(),
+            ':approver': approved_by
+        }
+    )
+
+    # Notifier l'utilisateur
+    send_credentials_to_user(user_id, temp_creds, session_name)
+
+    # Logger pour audit
+    log_jit_grant(request_id, user_id, role_arn, approved_by, justification)
+
+    return {
+        'status': 'granted',
+        'request_id': request_id,
+        'expires_at': temp_creds['Credentials']['Expiration'].isoformat()
+    }
+
+def send_credentials_to_user(user_id, credentials, session_name):
+    """Envoyer les credentials de manière sécurisée"""
+    # Option 1: Via Secrets Manager avec accès temporaire
+    secrets = boto3.client('secretsmanager')
+
+    secret_name = f"jit-access/{user_id}/{session_name}"
+
+    secrets.create_secret(
+        Name=secret_name,
+        SecretString=json.dumps({
+            'AccessKeyId': credentials['Credentials']['AccessKeyId'],
+            'SecretAccessKey': credentials['Credentials']['SecretAccessKey'],
+            'SessionToken': credentials['Credentials']['SessionToken'],
+            'Expiration': credentials['Credentials']['Expiration'].isoformat()
+        }),
+        Tags=[
+            {'Key': 'Type', 'Value': 'JITAccess'},
+            {'Key': 'ExpiresAt', 'Value': credentials['Credentials']['Expiration'].isoformat()}
+        ]
+    )
+
+    # Notifier l'utilisateur du nom du secret
+    send_slack_notification(user_id, f"Your JIT access is ready. Retrieve credentials from Secrets Manager: {secret_name}")
+
+def log_jit_grant(request_id, user_id, role_arn, approved_by, justification):
+    """Logger l'octroi d'accès JIT pour audit"""
+    cloudwatch = boto3.client('logs')
+
+    log_entry = {
+        'timestamp': datetime.now().isoformat(),
+        'event': 'JIT_ACCESS_GRANTED',
+        'request_id': request_id,
+        'user_id': user_id,
+        'role_arn': role_arn,
+        'approved_by': approved_by,
+        'justification': justification,
+        'duration': '1 hour'
+    }
+
+    cloudwatch.put_log_events(
+        logGroupName='/aws/security/jit-access',
+        logStreamName=datetime.now().strftime('%Y/%m/%d'),
+        logEvents=[{
+            'timestamp': int(datetime.now().timestamp() * 1000),
+            'message': json.dumps(log_entry)
+        }]
+    )
+```
+
+---
+
 ## Conclusion
 
 La sécurisation IAM est un **processus continu** qui nécessite :
@@ -2040,6 +2794,9 @@ La sécurisation IAM est un **processus continu** qui nécessite :
 - Une authentification forte avec MFA
 - Des audits réguliers et automatisés
 - Une surveillance proactive des menaces
+- **Permission Boundaries** pour délégation sécurisée
+- **Break Glass Procedures** pour urgences
+- **JIT Access** pour minimiser la surface d'attaque
 
 En 2025, avec l'augmentation des attaques ciblant les identités cloud, IAM représente la première ligne de défense de votre infrastructure AWS. L'implémentation de ce guide permettra de réduire significativement la surface d'attaque et de garantir la conformité avec les standards de sécurité actuels.
 

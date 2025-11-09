@@ -2047,6 +2047,1433 @@ Hooks:
 
 ---
 
+## Runtime Security et Détection de Menaces
+
+### 1. Falco pour Kubernetes (EKS)
+
+Falco est un outil open-source de **détection d'anomalies runtime** pour containers, capable de détecter comportements suspects au niveau du kernel.
+
+#### 1.1 Déploiement Falco sur EKS
+
+```yaml
+# falco-daemonset.yaml
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: falco
+  namespace: security
+spec:
+  selector:
+    matchLabels:
+      app: falco
+  template:
+    metadata:
+      labels:
+        app: falco
+    spec:
+      serviceAccountName: falco
+      hostNetwork: true
+      hostPID: true
+      containers:
+      - name: falco
+        image: falcosecurity/falco:0.36.2
+        securityContext:
+          privileged: true  # Requis pour accéder au kernel
+        volumeMounts:
+        - name: dev
+          mountPath: /host/dev
+        - name: proc
+          mountPath: /host/proc
+          readOnly: true
+        - name: boot
+          mountPath: /host/boot
+          readOnly: true
+        - name: lib-modules
+          mountPath: /host/lib/modules
+          readOnly: true
+        - name: usr
+          mountPath: /host/usr
+          readOnly: true
+        - name: etc
+          mountPath: /host/etc
+          readOnly: true
+        - name: config
+          mountPath: /etc/falco
+        env:
+        - name: FALCO_K8S_AUDIT_ENDPOINT
+          value: "http://localhost:8765/k8s-audit"
+      volumes:
+      - name: dev
+        hostPath:
+          path: /dev
+      - name: proc
+        hostPath:
+          path: /proc
+      - name: boot
+        hostPath:
+          path: /boot
+      - name: lib-modules
+        hostPath:
+          path: /lib/modules
+      - name: usr
+        hostPath:
+          path: /usr
+      - name: etc
+        hostPath:
+          path: /etc
+      - name: config
+        configMap:
+          name: falco-config
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: falco
+  namespace: security
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: falco
+rules:
+- apiGroups: [""]
+  resources:
+    - pods
+    - namespaces
+    - nodes
+  verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: falco
+subjects:
+- kind: ServiceAccount
+  name: falco
+  namespace: security
+roleRef:
+  kind: ClusterRole
+  name: falco
+  apiGroup: rbac.authorization.k8s.io
+```
+
+#### 1.2 Règles Falco Personnalisées
+
+```yaml
+# falco-rules.yaml
+customRules:
+  custom-rules.yaml: |-
+    # Détection de shell interactif dans container
+    - rule: Terminal Shell in Container
+      desc: A shell was spawned in a container
+      condition: >
+        spawned_process and
+        container and
+        proc.name in (bash, sh, zsh, fish) and
+        proc.tty != 0
+      output: >
+        Shell spawned in container (user=%user.name command=%proc.cmdline
+        container_id=%container.id container_name=%container.name
+        image=%container.image.repository:%container.image.tag)
+      priority: WARNING
+      tags: [container, shell, mitre_execution]
+
+    # Détection de reverse shell
+    - rule: Reverse Shell Detected
+      desc: Reverse shell connection detected
+      condition: >
+        spawned_process and
+        container and
+        ((proc.name in (bash, sh, zsh) and
+          proc.args contains "-i" and
+          (proc.args contains "/dev/tcp" or proc.args contains "/dev/udp")) or
+         (proc.name = nc and proc.args contains "-e"))
+      output: >
+        Reverse shell detected (user=%user.name command=%proc.cmdline
+        container_id=%container.id container_name=%container.name
+        image=%container.image.repository:%container.image.tag)
+      priority: CRITICAL
+      tags: [container, reverse_shell, mitre_execution]
+
+    # Modification de fichiers sensibles
+    - rule: Sensitive File Modification
+      desc: Sensitive file was modified in container
+      condition: >
+        open_write and
+        container and
+        fd.name in (/etc/passwd, /etc/shadow, /etc/sudoers,
+                    /root/.ssh/authorized_keys, /home/*/.ssh/authorized_keys)
+      output: >
+        Sensitive file modified (user=%user.name file=%fd.name
+        command=%proc.cmdline container_id=%container.id
+        container_name=%container.name image=%container.image.repository)
+      priority: CRITICAL
+      tags: [container, filesystem, mitre_persistence]
+
+    # Execution de binaires suspects
+    - rule: Suspicious Binary Execution
+      desc: Execution of suspicious binary in container
+      condition: >
+        spawned_process and
+        container and
+        proc.name in (nmap, masscan, nc, netcat, socat, curl, wget) and
+        proc.pname != package_manager
+      output: >
+        Suspicious binary executed (user=%user.name binary=%proc.name
+        args=%proc.args container_id=%container.id
+        container_name=%container.name image=%container.image.repository)
+      priority: WARNING
+      tags: [container, network, mitre_discovery]
+
+    # Privilege escalation
+    - rule: Privilege Escalation Attempt
+      desc: Attempt to escalate privileges detected
+      condition: >
+        spawned_process and
+        container and
+        proc.name in (sudo, su) and
+        not user.name in (root)
+      output: >
+        Privilege escalation attempt (user=%user.name command=%proc.cmdline
+        container_id=%container.id container_name=%container.name)
+      priority: CRITICAL
+      tags: [container, privilege_escalation]
+
+    # Crypto mining
+    - rule: Cryptocurrency Mining Detected
+      desc: Cryptocurrency mining activity detected
+      condition: >
+        spawned_process and
+        container and
+        (proc.name in (xmrig, ccminer, ethminer, minerd) or
+         proc.cmdline contains "stratum+tcp" or
+         proc.cmdline contains "mining.pool")
+      output: >
+        Cryptocurrency mining detected (command=%proc.cmdline
+        container_id=%container.id container_name=%container.name
+        image=%container.image.repository)
+      priority: CRITICAL
+      tags: [container, cryptomining, mitre_impact]
+
+    # Container running as root
+    - rule: Container Running as Root
+      desc: Container is running as root user
+      condition: >
+        container_started and
+        container and
+        user.uid = 0
+      output: >
+        Container running as root (container_id=%container.id
+        container_name=%container.name image=%container.image.repository:%container.image.tag
+        user=%user.name)
+      priority: WARNING
+      tags: [container, users]
+
+    # Outbound connection to suspicious port
+    - rule: Outbound Connection to Suspicious Port
+      desc: Outbound connection to suspicious port detected
+      condition: >
+        outbound and
+        container and
+        fd.sport in (4444, 5555, 6666, 7777, 8888, 9999)
+      output: >
+        Outbound connection to suspicious port (user=%user.name
+        connection=%fd.name sport=%fd.sport dport=%fd.dport
+        container_id=%container.id container_name=%container.name)
+      priority: WARNING
+      tags: [container, network]
+```
+
+#### 1.3 Intégration Falco avec CloudWatch
+
+**Falco Sidekick pour router alertes vers CloudWatch:**
+
+```yaml
+# falcosidekick-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: falcosidekick
+  namespace: security
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: falcosidekick
+  template:
+    metadata:
+      labels:
+        app: falcosidekick
+    spec:
+      containers:
+      - name: falcosidekick
+        image: falcosecurity/falcosidekick:2.28.0
+        env:
+        - name: AWS_CLOUDWATCHLOGS_LOGGROUP
+          value: "/aws/eks/falco-alerts"
+        - name: AWS_CLOUDWATCHLOGS_LOGSTREAM
+          value: "security-alerts"
+        - name: AWS_REGION
+          value: "us-east-1"
+        - name: AWS_CLOUDWATCHLOGS_MINIMUMPRIORITY
+          value: "warning"
+        - name: SLACK_WEBHOOKURL
+          valueFrom:
+            secretKeyRef:
+              name: falco-secrets
+              key: slack-webhook
+        ports:
+        - containerPort: 2801
+      serviceAccountName: falcosidekick
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: falcosidekick
+  namespace: security
+spec:
+  selector:
+    app: falcosidekick
+  ports:
+  - port: 2801
+    targetPort: 2801
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: falcosidekick
+  namespace: security
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/FalcoCloudWatchRole
+```
+
+**IAM Role pour Falco:**
+
+```hcl
+# Terraform configuration pour IAM Role
+resource "aws_iam_role" "falco_cloudwatch" {
+  name = "FalcoCloudWatchRole"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Principal = {
+        Federated = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:oidc-provider/${replace(data.aws_eks_cluster.main.identity[0].oidc[0].issuer, "https://", "")}"
+      }
+      Action = "sts:AssumeRoleWithWebIdentity"
+      Condition = {
+        StringEquals = {
+          "${replace(data.aws_eks_cluster.main.identity[0].oidc[0].issuer, "https://", "")}:sub" = "system:serviceaccount:security:falcosidekick"
+        }
+      }
+    }]
+  })
+}
+
+resource "aws_iam_role_policy" "falco_cloudwatch" {
+  name = "CloudWatchLogsAccess"
+  role = aws_iam_role.falco_cloudwatch.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "logs:CreateLogGroup",
+          "logs:CreateLogStream",
+          "logs:PutLogEvents",
+          "logs:DescribeLogStreams"
+        ]
+        Resource = "arn:aws:logs:*:*:log-group:/aws/eks/falco-alerts:*"
+      }
+    ]
+  })
+}
+```
+
+#### 1.4 Analyse des Alertes Falco
+
+**CloudWatch Logs Insights queries:**
+
+```sql
+# Top 10 règles Falco déclenchées
+fields @timestamp, rule, priority, output
+| filter priority = "Critical" or priority = "Warning"
+| stats count(*) as alertCount by rule
+| sort alertCount desc
+| limit 10
+
+# Containers suspects (shells, reverse shells)
+fields @timestamp, output, container_name, container_image
+| filter rule like /Shell|Reverse/
+| sort @timestamp desc
+
+# Timeline des tentatives d'escalade de privilèges
+fields @timestamp, output, user_name, container_name
+| filter rule = "Privilege Escalation Attempt"
+| sort @timestamp desc
+
+# Crypto mining detection
+fields @timestamp, output, container_id, container_name
+| filter rule = "Cryptocurrency Mining Detected"
+| stats count(*) as instances by container_image
+```
+
+### 2. Amazon GuardDuty Runtime Monitoring
+
+GuardDuty peut désormais monitorer le runtime des containers ECS et EKS pour détecter des menaces.
+
+#### 2.1 Activation GuardDuty Runtime Monitoring
+
+```bash
+# Activer GuardDuty pour EKS
+aws guardduty update-detector \
+    --detector-id <detector-id> \
+    --features '[{
+        "Name": "EKS_RUNTIME_MONITORING",
+        "Status": "ENABLED",
+        "AdditionalConfiguration": [{
+            "Name": "EKS_ADDON_MANAGEMENT",
+            "Status": "ENABLED"
+        }]
+    }]'
+
+# GuardDuty déploiera automatiquement l'agent sur les nodes EKS
+
+# Activer pour ECS (Fargate)
+aws guardduty update-detector \
+    --detector-id <detector-id> \
+    --features '[{
+        "Name": "ECS_FARGATE_RUNTIME_MONITORING",
+        "Status": "ENABLED"
+    }]'
+```
+
+#### 2.2 Findings GuardDuty Runtime
+
+GuardDuty détectera:
+
+| Finding | Description | Severity |
+|---------|-------------|----------|
+| `Runtime:Container/SuspiciousProcess` | Processus suspect dans container | High |
+| `Runtime:Container/ReverseShell` | Connexion reverse shell détectée | Critical |
+| `Runtime:Container/PrivilegeEscalation` | Tentative d'escalade de privilèges | High |
+| `Runtime:Container/NewBinaryExecuted` | Binaire inconnu exécuté | Medium |
+| `Runtime:Container/FileSystemModification` | Modification fichiers système | High |
+
+**Réponse automatique aux findings:**
+
+```python
+import boto3
+import json
+
+ecs = boto3.client('ecs')
+ec2 = boto3.client('ec2')
+sns = boto3.client('sns')
+
+def lambda_handler(event, context):
+    """
+    Réponse automatique aux findings GuardDuty Runtime
+    """
+
+    detail = event['detail']
+    finding_type = detail['type']
+    severity = detail['severity']
+
+    # Extraire infos container
+    resource = detail['resource']
+    container_details = resource.get('containerDetails', {})
+    container_id = container_details.get('id', 'unknown')
+    container_image = container_details.get('imagePrefix', 'unknown')
+
+    # Actions basées sur sévérité
+    if severity >= 7.0:  # High ou Critical
+        if 'ECS' in finding_type:
+            # Isoler task ECS
+            task_arn = resource['ecsTaskDetails']['taskArn']
+            cluster_arn = resource['ecsTaskDetails']['clusterArn']
+
+            # Arrêter task
+            ecs.stop_task(
+                cluster=cluster_arn,
+                task=task_arn,
+                reason='GuardDuty security finding: ' + finding_type
+            )
+
+            print(f"Stopped ECS task {task_arn} due to {finding_type}")
+
+        elif 'EKS' in finding_type:
+            # Pour EKS, quarantiner pod via Network Policy
+            # (nécessite intégration avec API Kubernetes)
+            pass
+
+        # Notification SNS
+        sns.publish(
+            TopicArn='arn:aws:sns:us-east-1:123456789012:SecurityIncidents',
+            Subject=f'CRITICAL: GuardDuty Runtime Alert - {finding_type}',
+            Message=json.dumps(detail, indent=2)
+        )
+
+    return {'statusCode': 200}
+```
+
+### 3. AWS Inspector pour Container Scanning
+
+Inspector scanne les images ECR et les instances EC2 pour vulnérabilités.
+
+```hcl
+# Activer Inspector v2
+resource "aws_inspector2_enabler" "main" {
+  account_ids    = [data.aws_caller_identity.current.account_id]
+  resource_types = ["ECR", "EC2", "LAMBDA"]
+}
+
+# Alerte sur vulnérabilités critiques
+resource "aws_cloudwatch_event_rule" "inspector_findings" {
+  name        = "inspector-critical-vulnerabilities"
+  description = "Alert on critical Inspector findings"
+
+  event_pattern = jsonencode({
+    source      = ["aws.inspector2"]
+    detail-type = ["Inspector2 Finding"]
+    detail = {
+      severity = ["CRITICAL", "HIGH"]
+    }
+  })
+}
+
+resource "aws_cloudwatch_event_target" "sns" {
+  rule      = aws_cloudwatch_event_rule.inspector_findings.name
+  target_id = "SendToSNS"
+  arn       = aws_sns_topic.security_alerts.arn
+}
+```
+
+---
+
+## Sécurité Lambda Layers
+
+### 1. Risques de Sécurité Lambda Layers
+
+Lambda Layers peuvent introduire des vulnérabilités si mal gérés:
+
+| Risque | Impact | Mitigation |
+|--------|--------|------------|
+| **Dépendances vulnérables** | Exploitation CVE | Scanner layers avec Snyk/Trivy |
+| **Layers partagés publiquement** | Exposition de code | Layers privés uniquement |
+| **Layers non versionnés** | Incompatibilités | Versionning strict |
+| **Code malveillant** | Backdoor | Audit code tiers |
+
+### 2. Best Practices Lambda Layers
+
+#### 2.1 Scanner les Layers pour Vulnérabilités
+
+```bash
+# Créer layer localement
+mkdir python
+pip install -t python/ requests boto3
+
+# Scanner avec Trivy avant déploiement
+trivy fs python/ --severity CRITICAL,HIGH
+
+# Si clean, créer layer
+zip -r layer.zip python/
+aws lambda publish-layer-version \
+    --layer-name secure-dependencies \
+    --zip-file fileb://layer.zip \
+    --compatible-runtimes python3.11 \
+    --description "Scanned dependencies - no CVEs" \
+    --license-info "MIT"
+```
+
+#### 2.2 Layers Privés et Permissions
+
+```hcl
+# Layer privé (pas de permissions publiques)
+resource "aws_lambda_layer_version" "dependencies" {
+  layer_name          = "app-dependencies"
+  filename            = "layer.zip"
+  source_code_hash    = filebase64sha256("layer.zip")
+  compatible_runtimes = ["python3.11"]
+
+  description = "Application dependencies - scanned for vulnerabilities"
+}
+
+# NE PAS faire ceci (layer public)
+# resource "aws_lambda_layer_version_permission" "public" {
+#   layer_name     = aws_lambda_layer_version.dependencies.layer_name
+#   version_number = aws_lambda_layer_version.dependencies.version
+#   principal      = "*"  # ❌ DANGEREUX
+#   action         = "lambda:GetLayerVersion"
+# }
+
+# Permissions spécifiques par account/OU
+resource "aws_lambda_layer_version_permission" "specific_account" {
+  layer_name     = aws_lambda_layer_version.dependencies.layer_name
+  version_number = aws_lambda_layer_version.dependencies.version
+  principal      = "123456789012"  # Account ID spécifique
+  action         = "lambda:GetLayerVersion"
+  statement_id   = "AllowAccount123456789012"
+}
+```
+
+#### 2.3 Versionning et Rotation des Layers
+
+```python
+# lambda_layer_updater.py
+import boto3
+import hashlib
+import os
+
+lambda_client = boto3.client('lambda')
+
+def update_layer_if_changed(layer_name, zip_path, compatible_runtimes):
+    """
+    Met à jour layer uniquement si contenu a changé
+    """
+
+    # Calculer hash du nouveau layer
+    with open(zip_path, 'rb') as f:
+        new_hash = hashlib.sha256(f.read()).hexdigest()
+
+    # Récupérer dernière version
+    try:
+        response = lambda_client.list_layer_versions(
+            LayerName=layer_name,
+            MaxItems=1
+        )
+
+        if response['LayerVersions']:
+            latest_version = response['LayerVersions'][0]
+            latest_hash = latest_version.get('CodeSha256')
+
+            if latest_hash == new_hash:
+                print(f"Layer {layer_name} unchanged, skipping update")
+                return latest_version['Version']
+    except lambda_client.exceptions.ResourceNotFoundException:
+        pass
+
+    # Publier nouvelle version
+    with open(zip_path, 'rb') as f:
+        response = lambda_client.publish_layer_version(
+            LayerName=layer_name,
+            Content={'ZipFile': f.read()},
+            CompatibleRuntimes=compatible_runtimes,
+            Description=f'SHA256: {new_hash}'
+        )
+
+    new_version = response['Version']
+    print(f"Published new layer version: {layer_name}:{ new_version}")
+
+    # Mettre à jour toutes les fonctions utilisant ce layer
+    update_functions_with_layer(layer_name, new_version)
+
+    # Supprimer anciennes versions (garder 3 dernières)
+    cleanup_old_layer_versions(layer_name, keep=3)
+
+    return new_version
+
+def update_functions_with_layer(layer_name, new_version):
+    """
+    Met à jour toutes les fonctions utilisant ce layer
+    """
+    paginator = lambda_client.get_paginator('list_functions')
+
+    for page in paginator.paginate():
+        for function in page['Functions']:
+            function_name = function['FunctionName']
+            layers = function.get('Layers', [])
+
+            # Vérifier si fonction utilise ce layer
+            updated_layers = []
+            layer_found = False
+
+            for layer in layers:
+                layer_arn = layer['Arn']
+                if layer_name in layer_arn:
+                    # Mettre à jour vers nouvelle version
+                    base_arn = layer_arn.rsplit(':', 1)[0]
+                    updated_layers.append(f"{base_arn}:{new_version}")
+                    layer_found = True
+                else:
+                    updated_layers.append(layer_arn)
+
+            if layer_found:
+                lambda_client.update_function_configuration(
+                    FunctionName=function_name,
+                    Layers=updated_layers
+                )
+                print(f"Updated function {function_name} to layer version {new_version}")
+
+def cleanup_old_layer_versions(layer_name, keep=3):
+    """
+    Supprime les anciennes versions de layer (garde les N dernières)
+    """
+    response = lambda_client.list_layer_versions(LayerName=layer_name)
+    versions = response['LayerVersions']
+
+    # Garder les N dernières versions
+    if len(versions) > keep:
+        for version in versions[keep:]:
+            lambda_client.delete_layer_version(
+                LayerName=layer_name,
+                VersionNumber=version['Version']
+            )
+            print(f"Deleted old layer version: {layer_name}:{version['Version']}")
+```
+
+#### 2.4 Audit et Monitoring des Layers
+
+```bash
+# CloudWatch Logs Insights - Quelles fonctions utilisent quels layers
+aws lambda list-functions --query 'Functions[?Layers].{Name:FunctionName, Layers:Layers[].Arn}' --output table
+
+# Trouver layers publics (risque sécurité)
+aws lambda list-layers --query 'Layers[?contains(Arn, `public`)]'
+
+# Audit permissions layer
+aws lambda get-layer-version-policy --layer-name my-layer --version-number 1
+```
+
+---
+
+## Gestion Avancée des Secrets pour ECS/EKS
+
+### 1. Secrets Manager pour ECS
+
+#### 1.1 Injection Sécurisée dans Task Definition
+
+```json
+{
+  "family": "secure-app",
+  "taskRoleArn": "arn:aws:iam::123456789012:role/ecsTaskRole",
+  "executionRoleArn": "arn:aws:iam::123456789012:role/ecsExecutionRole",
+  "containerDefinitions": [{
+    "name": "app",
+    "image": "myapp:latest",
+    "secrets": [
+      {
+        "name": "DB_PASSWORD",
+        "valueFrom": "arn:aws:secretsmanager:us-east-1:123456789012:secret:prod/db/password-AbCdEf"
+      },
+      {
+        "name": "API_KEY",
+        "valueFrom": "arn:aws:secretsmanager:us-east-1:123456789012:secret:prod/api/key-AbCdEf:apiKey::"
+      },
+      {
+        "name": "JWT_SECRET",
+        "valueFrom": "arn:aws:secretsmanager:us-east-1:123456789012:secret:prod/jwt-AbCdEf:secret::"
+      }
+    ],
+    "logConfiguration": {
+      "logDriver": "awslogs",
+      "secretOptions": [
+        {
+          "name": "SPLUNK_TOKEN",
+          "valueFrom": "arn:aws:secretsmanager:us-east-1:123456789012:secret:monitoring/splunk-token-AbCdEf"
+        }
+      ]
+    }
+  }]
+}
+```
+
+**IAM Execution Role:**
+
+```hcl
+resource "aws_iam_role" "ecs_execution_role" {
+  name = "ecsExecutionRole"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Principal = {
+        Service = "ecs-tasks.amazonaws.com"
+      }
+      Action = "sts:AssumeRole"
+    }]
+  })
+}
+
+resource "aws_iam_role_policy" "ecs_secrets_access" {
+  name = "SecretsManagerAccess"
+  role = aws_iam_role.ecs_execution_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "secretsmanager:GetSecretValue",
+          "secretsmanager:DescribeSecret"
+        ]
+        Resource = [
+          "arn:aws:secretsmanager:us-east-1:123456789012:secret:prod/*"
+        ]
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "kms:Decrypt"
+        ]
+        Resource = "arn:aws:kms:us-east-1:123456789012:key/*"
+        Condition = {
+          StringEquals = {
+            "kms:ViaService" = "secretsmanager.us-east-1.amazonaws.com"
+          }
+        }
+      }
+    ]
+  })
+}
+```
+
+### 2. External Secrets Operator pour EKS
+
+External Secrets Operator synchronise secrets depuis AWS Secrets Manager vers Kubernetes Secrets.
+
+#### 2.1 Installation External Secrets Operator
+
+```bash
+# Installer via Helm
+helm repo add external-secrets https://charts.external-secrets.io
+helm install external-secrets \
+    external-secrets/external-secrets \
+    -n external-secrets-system \
+    --create-namespace
+```
+
+#### 2.2 Configuration SecretStore
+
+```yaml
+# secretstore.yaml
+apiVersion: external-secrets.io/v1beta1
+kind: SecretStore
+metadata:
+  name: aws-secretsmanager
+  namespace: production
+spec:
+  provider:
+    aws:
+      service: SecretsManager
+      region: us-east-1
+      auth:
+        jwt:
+          serviceAccountRef:
+            name: external-secrets-sa
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: external-secrets-sa
+  namespace: production
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/ExternalSecretsRole
+```
+
+**IAM Role pour External Secrets:**
+
+```hcl
+resource "aws_iam_role" "external_secrets" {
+  name = "ExternalSecretsRole"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Principal = {
+        Federated = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:oidc-provider/${replace(data.aws_eks_cluster.main.identity[0].oidc[0].issuer, "https://", "")}"
+      }
+      Action = "sts:AssumeRoleWithWebIdentity"
+      Condition = {
+        StringEquals = {
+          "${replace(data.aws_eks_cluster.main.identity[0].oidc[0].issuer, "https://", "")}:sub" = "system:serviceaccount:production:external-secrets-sa"
+        }
+      }
+    }]
+  })
+}
+
+resource "aws_iam_role_policy" "external_secrets_policy" {
+  name = "SecretsManagerReadAccess"
+  role = aws_iam_role.external_secrets.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "secretsmanager:GetSecretValue",
+          "secretsmanager:DescribeSecret",
+          "secretsmanager:ListSecrets"
+        ]
+        Resource = "arn:aws:secretsmanager:us-east-1:123456789012:secret:production/*"
+      },
+      {
+        Effect = "Allow"
+        Action = ["kms:Decrypt"]
+        Resource = "*"
+        Condition = {
+          StringEquals = {
+            "kms:ViaService" = "secretsmanager.us-east-1.amazonaws.com"
+          }
+        }
+      }
+    ]
+  })
+}
+```
+
+#### 2.3 ExternalSecret CR
+
+```yaml
+# externalsecret.yaml
+apiVersion: external-secrets.io/v1beta1
+kind: ExternalSecret
+metadata:
+  name: app-database-credentials
+  namespace: production
+spec:
+  refreshInterval: 1h  # Synchroniser toutes les heures
+  secretStoreRef:
+    name: aws-secretsmanager
+    kind: SecretStore
+  target:
+    name: database-credentials  # Nom du Secret Kubernetes créé
+    creationPolicy: Owner
+    template:
+      engineVersion: v2
+      data:
+        # Template pour formater le secret
+        config.yaml: |
+          database:
+            host: {{ .host }}
+            port: {{ .port }}
+            username: {{ .username }}
+            password: {{ .password }}
+            database: {{ .database }}
+  data:
+  - secretKey: host
+    remoteRef:
+      key: production/database/main
+      property: host
+  - secretKey: port
+    remoteRef:
+      key: production/database/main
+      property: port
+  - secretKey: username
+    remoteRef:
+      key: production/database/main
+      property: username
+  - secretKey: password
+    remoteRef:
+      key: production/database/main
+      property: password
+  - secretKey: database
+    remoteRef:
+      key: production/database/main
+      property: database
+```
+
+**Utilisation dans Pod:**
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app
+  namespace: production
+spec:
+  template:
+    spec:
+      containers:
+      - name: app
+        image: myapp:latest
+        env:
+        - name: DB_HOST
+          valueFrom:
+            secretKeyRef:
+              name: database-credentials
+              key: host
+        - name: DB_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: database-credentials
+              key: password
+        # Ou monter comme fichier
+        volumeMounts:
+        - name: db-config
+          mountPath: /etc/config
+          readOnly: true
+      volumes:
+      - name: db-config
+        secret:
+          secretName: database-credentials
+          items:
+          - key: config.yaml
+            path: database.yaml
+```
+
+### 3. Rotation Automatique des Secrets
+
+#### 3.1 Lambda de Rotation pour RDS
+
+```python
+import boto3
+import json
+import os
+import pymysql
+
+secretsmanager = boto3.client('secretsmanager')
+rds = boto3.client('rds')
+
+def lambda_handler(event, context):
+    """
+    Rotation automatique des credentials RDS
+    """
+
+    secret_arn = event['SecretId']
+    token = event['ClientRequestToken']
+    step = event['Step']
+
+    # Récupérer secret actuel
+    current_secret = secretsmanager.get_secret_value(SecretId=secret_arn)
+    current_dict = json.loads(current_secret['SecretString'])
+
+    if step == "createSecret":
+        # Générer nouveau password
+        new_password = generate_secure_password()
+
+        # Créer version AWSPENDING
+        pending_dict = current_dict.copy()
+        pending_dict['password'] = new_password
+
+        secretsmanager.put_secret_value(
+            SecretId=secret_arn,
+            ClientRequestToken=token,
+            SecretString=json.dumps(pending_dict),
+            VersionStages=['AWSPENDING']
+        )
+
+    elif step == "setSecret":
+        # Mettre à jour password dans RDS
+        pending_secret = secretsmanager.get_secret_value(
+            SecretId=secret_arn,
+            VersionId=token,
+            VersionStage='AWSPENDING'
+        )
+        pending_dict = json.loads(pending_secret['SecretString'])
+
+        # Connexion avec ancien password
+        conn = pymysql.connect(
+            host=current_dict['host'],
+            user=current_dict['username'],
+            password=current_dict['password'],
+            database='mysql'
+        )
+
+        try:
+            with conn.cursor() as cursor:
+                # Changer password
+                cursor.execute(
+                    f"ALTER USER '{current_dict['username']}'@'%' IDENTIFIED BY '{pending_dict['password']}'"
+                )
+                cursor.execute("FLUSH PRIVILEGES")
+            conn.commit()
+        finally:
+            conn.close()
+
+    elif step == "testSecret":
+        # Tester nouveau password
+        pending_secret = secretsmanager.get_secret_value(
+            SecretId=secret_arn,
+            VersionId=token,
+            VersionStage='AWSPENDING'
+        )
+        pending_dict = json.loads(pending_secret['SecretString'])
+
+        # Test connexion
+        conn = pymysql.connect(
+            host=pending_dict['host'],
+            user=pending_dict['username'],
+            password=pending_dict['password']
+        )
+        conn.close()
+
+    elif step == "finishSecret":
+        # Promouvoir AWSPENDING vers AWSCURRENT
+        secretsmanager.update_secret_version_stage(
+            SecretId=secret_arn,
+            VersionStage='AWSCURRENT',
+            MoveToVersionId=token,
+            RemoveFromVersionId=current_secret['VersionId']
+        )
+
+    return {'statusCode': 200}
+
+def generate_secure_password(length=32):
+    import secrets
+    import string
+    alphabet = string.ascii_letters + string.digits + "!@#$%^&*"
+    return ''.join(secrets.choice(alphabet) for _ in range(length))
+```
+
+#### 3.2 Configuration Rotation dans Terraform
+
+```hcl
+# Secret avec rotation automatique
+resource "aws_secretsmanager_secret" "db_credentials" {
+  name                    = "production/database/credentials"
+  description             = "RDS database credentials with auto-rotation"
+  recovery_window_in_days = 7
+
+  tags = {
+    Environment = "production"
+    Rotation    = "enabled"
+  }
+}
+
+resource "aws_secretsmanager_secret_version" "db_credentials" {
+  secret_id = aws_secretsmanager_secret.db_credentials.id
+  secret_string = jsonencode({
+    username = "app_user"
+    password = random_password.db_password.result
+    host     = aws_db_instance.main.endpoint
+    port     = 3306
+    database = "production_db"
+  })
+}
+
+# Lambda de rotation
+resource "aws_lambda_function" "rotate_secret" {
+  filename      = "rotation_lambda.zip"
+  function_name = "RotateRDSSecret"
+  role          = aws_iam_role.lambda_rotation.arn
+  handler       = "index.lambda_handler"
+  runtime       = "python3.11"
+  timeout       = 30
+
+  vpc_config {
+    subnet_ids         = aws_subnet.private_app[*].id
+    security_group_ids = [aws_security_group.lambda_rotation.id]
+  }
+
+  environment {
+    variables = {
+      SECRETS_MANAGER_ENDPOINT = "https://secretsmanager.us-east-1.amazonaws.com"
+    }
+  }
+}
+
+# Permission pour Secrets Manager d'invoquer Lambda
+resource "aws_lambda_permission" "allow_secretsmanager" {
+  statement_id  = "AllowExecutionFromSecretsManager"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.rotate_secret.function_name
+  principal     = "secretsmanager.amazonaws.com"
+}
+
+# Configuration rotation
+resource "aws_secretsmanager_secret_rotation" "db_credentials" {
+  secret_id           = aws_secretsmanager_secret.db_credentials.id
+  rotation_lambda_arn = aws_lambda_function.rotate_secret.arn
+
+  rotation_rules {
+    automatically_after_days = 30  # Rotation mensuelle
+  }
+}
+```
+
+---
+
+## Sidecar Security Patterns
+
+### 1. Envoy Proxy comme Security Sidecar
+
+Envoy peut servir de proxy sidecar pour:
+- **Chiffrement mTLS automatique**
+- **Rate limiting**
+- **Authentication/Authorization**
+- **Observabilité**
+
+#### 1.1 Configuration Envoy Sidecar pour ECS
+
+```json
+{
+  "family": "app-with-envoy",
+  "networkMode": "awsvpc",
+  "containerDefinitions": [
+    {
+      "name": "app",
+      "image": "myapp:latest",
+      "portMappings": [{
+        "containerPort": 8080,
+        "protocol": "tcp"
+      }],
+      "dependsOn": [{
+        "containerName": "envoy",
+        "condition": "HEALTHY"
+      }]
+    },
+    {
+      "name": "envoy",
+      "image": "envoyproxy/envoy:v1.28-latest",
+      "essential": true,
+      "portMappings": [{
+        "containerPort": 9901,
+        "protocol": "tcp"
+      }, {
+        "containerPort": 15000,
+        "protocol": "tcp"
+      }],
+      "healthCheck": {
+        "command": [
+          "CMD-SHELL",
+          "curl -f http://localhost:9901/ready || exit 1"
+        ],
+        "interval": 10,
+        "timeout": 5,
+        "retries": 3
+      },
+      "user": "1337",
+      "mountPoints": [{
+        "sourceVolume": "envoy-config",
+        "containerPath": "/etc/envoy",
+        "readOnly": true
+      }]
+    }
+  ],
+  "volumes": [{
+    "name": "envoy-config",
+    "host": {
+      "sourcePath": "/ecs/envoy-config"
+    }
+  }]
+}
+```
+
+**Envoy Configuration (envoy.yaml):**
+
+```yaml
+admin:
+  address:
+    socket_address:
+      address: 0.0.0.0
+      port_value: 9901
+
+static_resources:
+  listeners:
+  - name: listener_0
+    address:
+      socket_address:
+        address: 0.0.0.0
+        port_value: 15000
+    filter_chains:
+    - filters:
+      - name: envoy.filters.network.http_connection_manager
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+          stat_prefix: ingress_http
+          route_config:
+            name: local_route
+            virtual_hosts:
+            - name: backend
+              domains: ["*"]
+              routes:
+              - match:
+                  prefix: "/"
+                route:
+                  cluster: local_app
+                # Rate limiting
+                rate_limits:
+                - actions:
+                  - request_headers:
+                      header_name: "x-user-id"
+                      descriptor_key: "user_id"
+          http_filters:
+          # JWT Authentication
+          - name: envoy.filters.http.jwt_authn
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.http.jwt_authn.v3.JwtAuthentication
+              providers:
+                auth0:
+                  issuer: "https://myapp.auth0.com/"
+                  audiences:
+                  - "https://api.myapp.com"
+                  remote_jwks:
+                    http_uri:
+                      uri: "https://myapp.auth0.com/.well-known/jwks.json"
+                      cluster: auth0_jwks
+                      timeout: 5s
+              rules:
+              - match:
+                  prefix: "/api"
+                requires:
+                  provider_name: "auth0"
+          # Rate limiting filter
+          - name: envoy.filters.http.ratelimit
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.http.ratelimit.v3.RateLimit
+              domain: api_ratelimit
+              rate_limit_service:
+                grpc_service:
+                  envoy_grpc:
+                    cluster_name: ratelimit
+          # Router filter
+          - name: envoy.filters.http.router
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+      # mTLS configuration
+      transport_socket:
+        name: envoy.transport_sockets.tls
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.DownstreamTlsContext
+          common_tls_context:
+            tls_certificates:
+            - certificate_chain:
+                filename: "/etc/envoy/certs/server-cert.pem"
+              private_key:
+                filename: "/etc/envoy/certs/server-key.pem"
+            validation_context:
+              trusted_ca:
+                filename: "/etc/envoy/certs/ca-cert.pem"
+          require_client_certificate: true
+
+  clusters:
+  - name: local_app
+    connect_timeout: 0.25s
+    type: STRICT_DNS
+    lb_policy: ROUND_ROBIN
+    load_assignment:
+      cluster_name: local_app
+      endpoints:
+      - lb_endpoints:
+        - endpoint:
+            address:
+              socket_address:
+                address: 127.0.0.1
+                port_value: 8080
+```
+
+### 2. AWS App Mesh pour Service Mesh
+
+App Mesh fournit communication sécurisée entre microservices avec mTLS automatique.
+
+```hcl
+# Virtual Gateway (entry point)
+resource "aws_appmesh_virtual_gateway" "main" {
+  name      = "api-gateway"
+  mesh_name = aws_appmesh_mesh.main.id
+
+  spec {
+    listener {
+      port_mapping {
+        port     = 443
+        protocol = "http"
+      }
+
+      tls {
+        mode = "STRICT"
+        certificate {
+          acm {
+            certificate_arn = aws_acm_certificate.api.arn
+          }
+        }
+      }
+    }
+  }
+}
+
+# Virtual Service
+resource "aws_appmesh_virtual_service" "app" {
+  name      = "app.local"
+  mesh_name = aws_appmesh_mesh.main.id
+
+  spec {
+    provider {
+      virtual_router {
+        virtual_router_name = aws_appmesh_virtual_router.app.name
+      }
+    }
+  }
+}
+
+# Virtual Node avec mTLS
+resource "aws_appmesh_virtual_node" "app" {
+  name      = "app-node"
+  mesh_name = aws_appmesh_mesh.main.id
+
+  spec {
+    listener {
+      port_mapping {
+        port     = 8080
+        protocol = "http"
+      }
+
+      # mTLS Backend
+      tls {
+        mode = "STRICT"
+        certificate {
+          file {
+            certificate_chain = "/etc/envoy/certs/cert-chain.pem"
+            private_key       = "/etc/envoy/certs/private-key.pem"
+          }
+        }
+        validation {
+          trust {
+            file {
+              certificate_chain = "/etc/envoy/certs/ca-chain.pem"
+            }
+          }
+        }
+      }
+
+      health_check {
+        protocol            = "http"
+        path                = "/health"
+        healthy_threshold   = 2
+        unhealthy_threshold = 2
+        timeout_millis      = 2000
+        interval_millis     = 5000
+      }
+    }
+
+    service_discovery {
+      aws_cloud_map {
+        namespace_name = aws_service_discovery_private_dns_namespace.main.name
+        service_name   = "app"
+      }
+    }
+
+    # Backend virtual service avec mTLS client
+    backend {
+      virtual_service {
+        virtual_service_name = aws_appmesh_virtual_service.database.name
+        client_policy {
+          tls {
+            enforce = true
+            validation {
+              trust {
+                file {
+                  certificate_chain = "/etc/envoy/certs/ca-chain.pem"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+---
+
 ## Checklist de Sécurité Hébergement
 
 ### ✅ EC2 (Priorité Critique)
